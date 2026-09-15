@@ -1,3 +1,7 @@
+import os
+os.makedirs("/app/data", exist_ok=True)
+os.chdir("/app/data")
+
 import sqlite3
 from datetime import datetime
 
