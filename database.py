@@ -170,4 +170,24 @@ def get_recent_workouts(user_id, limit=5):
     """, (user_id, limit))
     rows = c.fetchall()
     conn.close()
-    return rows
+    return rowsdef move_set(user_id, set_id, new_exercise_short):
+    """Переносит запись в другое упражнение. Сохраняет day_name."""
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("SELECT exercise FROM sets WHERE id=? AND user_id=?", (set_id, user_id))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return False
+    old_key = row[0]
+    # Сохраняем day_name из старого ключа (до первого |)
+    if "|" in old_key:
+        day_name = old_key.split("|", 1)[0]
+    else:
+        day_name = ""
+    new_key = f"{day_name}|{new_exercise_short}" if day_name else new_exercise_short
+    c.execute("UPDATE sets SET exercise=? WHERE id=? AND user_id=?", (new_key, set_id, user_id))
+    conn.commit()
+    conn.close()
+    return True
+    
