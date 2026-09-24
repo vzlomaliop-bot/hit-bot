@@ -519,6 +519,18 @@ async def delete_record(call: CallbackQuery):
 
 
 # ===== ЗАПУСК =====
+@dp.
+message(Command("debug"))
+async def debug_cmd(msg: Message):
+    conn = __import__("sqlite3").connect("workouts.db")
+    c = conn.cursor()
+    c.execute("SELECT DISTINCT exercise FROM sets WHERE user_id=?", (msg.from_user.id,))
+    rows = c.fetchall()
+    conn.close()
+    text = f"Всего записей в БД: {len(rows)}\n\n"
+    for r in rows[:40]:
+        text += f"• {repr(r[0])}\n"
+    await msg.answer(text[:3500])
 
 async def main():
     init_db()
