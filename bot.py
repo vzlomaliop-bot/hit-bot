@@ -35,7 +35,6 @@ class EditFlow(StatesGroup):
 
 
 def _all_exercises(user_id):
-    """Упражнения из активной программы пользователя + те, что уже есть в БД."""
     names = set()
     prog_key = get_user_program(user_id)
     if prog_key and prog_key in PROGRAMS:
@@ -43,7 +42,6 @@ def _all_exercises(user_id):
             for ex in day["exercises"]:
                 if ex.get("name"):
                     names.add(ex["name"])
-    # Добавляем те, что уже записаны в БД (могли быть из другой программы)
     for n in get_user_exercises(user_id):
         names.add(n)
     return sorted(names)
@@ -90,6 +88,29 @@ async def start(msg: Message, state: FSMContext):
         )
     else:
         await msg.answer("Выбери программу тренировок:", reply_markup=programs_kb())
+
+
+@dp.message(Command("debug"))
+async def debug_cmd(msg: Message):
+    import sqlite3
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM sets WHERE user_id=?", (msg.from_user.id,))
+    total = c.fetchone()[0]
+    c.execute("SELECT DISTINCT exercise FROM sets WHERE user_id=?", (msg.from_user.id,))
+    rows = c.fetchall()
+    c.execute("SELECT DISTINCT program FROM sets WHERE user_id=?", (msg.from_user.id,))
+    progs = c.fetchall()
+    conn.close()
+
+    text = f"📊 <b>Debug</b>\n\n"
+    text += f"Всего записей: <b>{total}</b>\n"
+    text += f"Программ: {[p[0] for p in progs]}\n"
+    text += f"Активная: {get_user_program(msg.from_user.id)}\n\n"
+    text += f"<b>Уникальных exercise ({len(rows)}):</b>\n"
+    for r in rows[:40]:
+        text += f"• <code>{r[0]}</code>\n"
+    await msg.answer(text[:3900], parse_mode="HTML")
 
 
 @dp.callback_query(F.data == "change_prog")
@@ -222,8 +243,6 @@ async def log_set(msg: Message, state: FSMContext):
         await send_current(msg, state)
 
 
-# ===== ПРОГРЕСС =====
-
 @dp.callback_query(F.data == "progress")
 async def progress_cb(call: CallbackQuery):
     names = _all_exercises(call.from_user.id)
@@ -295,8 +314,6 @@ def _render_history(name, rows, idx):
     ])
     return text, kb
 
-
-# ===== РЕДАКТИРОВАНИЕ ЗАПИСЕЙ =====
 
 @dp.callback_query(F.data.startswith("editlist_"))
 async def edit_list(call: CallbackQuery):
