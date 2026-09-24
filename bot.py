@@ -32,7 +32,31 @@ class Workout(StatesGroup):
 
 class EditFlow(StatesGroup):
     entering_new = State()
-    choosing_exercise = State()
+
+
+# ===== ХЕЛПЕРЫ =====
+
+def _all_exercises(user_id):
+    """Все упражнения: из программы + из БД (на случай ручных записей)."""
+    names = set()
+    for prog in PROGRAMS.values():
+        for day in prog["days"]:
+            for ex in day["exercises"]:
+                if ex.get("name"):
+                    names.add(ex["name"])
+                for s in ex.get("substitutes", []) or []:
+                    if s:
+                        names.add(s)
+    # Добавляем те, что уже есть в БД (могли быть кастомные)
+    for n in get_user_exercises(user_id):
+        names.add(n)
+    return sorted(names)
+
+
+def _kb_back(cb, text="⬅️ Назад"):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=text, callback_data=cb)]
+    ])
 
 
 # ===== КЛАВИАТУРЫ =====
@@ -144,13 +168,19 @@ async def send_current(message, state):
     ex_name = data.get("current_ex_name") or ex["name"]
     key = f"{day['name']}|{ex_name}"
     last = get_last(message.chat.id, data["program"], key)
-    hint = ""
+
+    # Последний вес
     if last:
-        hint = "\n📌 Прошлый раз: " + ", ".join(f"{w}кг×{r}" for w, r, _ in last[:3])
+        last_str = " • ".join(f"{w}кг×{r}" for w, r, _ in last[:3])
+        prev_line = f"\n📌 Прошлый раз: <b>{last_str}</b>"
+    else:
+        prev_line = "\n📌 Прошлый раз: <i>нет данных</i>"
+
     text = (
         f"<b>{ex_name}</b>\n"
         f"Подход {st + 1} из {ex['sets']}\n"
-        f"🎯 {ex['reps']} повторов, RIR {ex['rir']}{hint}\n\n"
+        f"🎯 {ex['reps']} повторов, RIR {ex['rir']}"
+        f"{prev_line}\n\n"
         f"Введи: <code>вес повторения</code>\n"
         f"Например: <code>80 8</code>"
     )
@@ -254,14 +284,11 @@ async def log_set(msg: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "progress")
 async def progress_cb(call: CallbackQuery):
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     if not names:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="change_prog")]
-        ])
         await call.message.edit_text(
-            "📊 Пока нет записанных упражнений.\n\nНачни тренировку → данные появятся здесь.",
-            reply_markup=kb,
+            "📊 Пока нет упражнений.",
+            reply_markup=_kb_back("change_prog"),
         )
         return
     rows = [[InlineKeyboardButton(text=name, callback_data=f"ex_{i}")]
@@ -276,14 +303,20 @@ async def progress_cb(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("ex_"))
 async def show_exercise_history(call: CallbackQuery):
     idx = int(call.data.split("_", 1)[1])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     if idx >= len(names):
         await call.answer("Не найдено", show_alert=True)
         return
     name = names[idx]
     rows = get_exercise_history(call.from_user.id, name)
     if not rows:
-        await call.answer("Нет данных", show_alert=True)
+        await call.message.edit_text(
+            f"📈 <b>{name}</b>\n\n"
+            f"<i>Пока нет записей по этому упражнению.</i>\n\n"
+            f"Выполни его на тренировке — данные появятся здесь.",
+            reply_markup=_kb_back("progress", "⬅️ К упражнениям"),
+            parse_mode="HTML",
+        )
         return
     text, kb = _render_history(name, rows, idx)
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -326,17 +359,16 @@ def _render_history(name, rows, idx):
 @dp.callback_query(F.data.startswith("editlist_"))
 async def edit_list(call: CallbackQuery):
     idx = int(call.data.split("_")[1])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     if idx >= len(names):
         await call.answer("Ошибка")
         return
     name = names[idx]
     rows = get_exercise_history(call.from_user.id, name)
     if not rows:
-        await call.answer("Нет записей")
+        await call.answer("Нет записей по этому упражнению", show_alert=True)
         return
 
-    # Показываем последние 20 записей в виде кнопок
     display = rows[-20:]
     buttons = []
     for set_id, date, w, r, sn, ex, day_name in reversed(display):
@@ -345,7 +377,8 @@ async def edit_list(call: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"rec_{set_id}_{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex_{idx}")])
     await call.message.edit_text(
-        f"✏️ <b>{name}</b>\n\nВыбери запись для изменения "
+        f"✏️ <b>{name}</b>\n\n"
+        f"Выбери запись для изменения "
         f"(показаны последние {len(display)} из {len(rows)}):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
@@ -359,7 +392,7 @@ async def show_record_actions(call: CallbackQuery):
     parts = call.data.split("_")
     set_id = int(parts[1])
     ex_idx = int(parts[2])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     if ex_idx >= len(names):
         await call.answer("Ошибка")
         return
@@ -397,7 +430,7 @@ async def edit_record(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
     set_id = int(parts[1])
     ex_idx = int(parts[2])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     name = names[ex_idx]
     await state.update_data(edit_set_id=set_id, edit_ex_idx=ex_idx, edit_name=name)
     await state.set_state(EditFlow.entering_new)
@@ -439,13 +472,13 @@ async def move_record(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
     set_id = int(parts[1])
     ex_idx = int(parts[2])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     current = names[ex_idx]
     others = [n for n in names if n != current]
 
     await state.update_data(move_set_id=set_id, move_from_idx=ex_idx, move_from_name=current)
 
-    rows = [[InlineKeyboardButton(text=n, callback_data=f"moveto_{n}_{ex_idx}")]
+    rows = [[InlineKeyboardButton(text=n, callback_data=f"moveto_{ex_idx}_{n}")]
             for n in others]
     rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rec_{set_id}_{ex_idx}")])
     await call.message.edit_text(
@@ -458,10 +491,11 @@ async def move_record(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("moveto_"))
 async def apply_move(call: CallbackQuery, state: FSMContext):
-    parts = call.data.split("_")
-    # format: moveto_<name>_<from_idx> — name может содержать "_", поэтому берём последний как idx
-    from_idx = int(parts[-1])
-    target_name = "_".join(parts[1:-1])
+    # формат: moveto_<from_idx>_<target_name>
+    body = call.data[len("moveto_"):]
+    first_underscore = body.find("_")
+    from_idx = int(body[:first_underscore])
+    target_name = body[first_underscore + 1:]
 
     data = await state.get_data()
     set_id = data.get("move_set_id")
@@ -479,13 +513,14 @@ async def apply_move(call: CallbackQuery, state: FSMContext):
         f"Из <b>{from_name}</b> → в <b>{target_name}</b>",
         parse_mode="HTML",
     )
-    # Показать историю нового упражнения
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     try:
         new_idx = names.index(target_name)
     except ValueError:
         return
     rows = get_exercise_history(call.from_user.id, target_name)
+    if not rows:
+        return
     text, kb = _render_history(target_name, rows, new_idx)
     await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -497,7 +532,7 @@ async def delete_record(call: CallbackQuery):
     parts = call.data.split("_")
     set_id = int(parts[1])
     ex_idx = int(parts[2])
-    names = get_user_exercises(call.from_user.id)
+    names = _all_exercises(call.from_user.id)
     if ex_idx >= len(names):
         await call.answer("Ошибка")
         return
@@ -509,9 +544,8 @@ async def delete_record(call: CallbackQuery):
     if not rows:
         await call.message.edit_text(
             f"📈 <b>{name}</b>\n\nВсе записи удалены.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")]
-            ]), parse_mode="HTML",
+            reply_markup=_kb_back("progress", "⬅️ К упражнениям"),
+            parse_mode="HTML",
         )
         return
     text, kb = _render_history(name, rows, ex_idx)
@@ -519,18 +553,6 @@ async def delete_record(call: CallbackQuery):
 
 
 # ===== ЗАПУСК =====
-@dp.
-message(Command("debug"))
-async def debug_cmd(msg: Message):
-    conn = __import__("sqlite3").connect("workouts.db")
-    c = conn.cursor()
-    c.execute("SELECT DISTINCT exercise FROM sets WHERE user_id=?", (msg.from_user.id,))
-    rows = c.fetchall()
-    conn.close()
-    text = f"Всего записей в БД: {len(rows)}\n\n"
-    for r in rows[:40]:
-        text += f"• {repr(r[0])}\n"
-    await msg.answer(text[:3500])
 
 async def main():
     init_db()
