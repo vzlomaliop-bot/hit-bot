@@ -34,10 +34,7 @@ class EditFlow(StatesGroup):
     entering_new = State()
 
 
-# ===== ХЕЛПЕРЫ =====
-
 def _all_exercises(user_id):
-    """Все упражнения: из программы + из БД (на случай ручных записей)."""
     names = set()
     for prog in PROGRAMS.values():
         for day in prog["days"]:
@@ -47,7 +44,6 @@ def _all_exercises(user_id):
                 for s in ex.get("substitutes", []) or []:
                     if s:
                         names.add(s)
-    # Добавляем те, что уже есть в БД (могли быть кастомные)
     for n in get_user_exercises(user_id):
         names.add(n)
     return sorted(names)
@@ -58,8 +54,6 @@ def _kb_back(cb, text="⬅️ Назад"):
         [InlineKeyboardButton(text=text, callback_data=cb)]
     ])
 
-
-# ===== КЛАВИАТУРЫ =====
 
 def programs_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -76,8 +70,6 @@ def days_kb(program_key):
     rows.append([InlineKeyboardButton(text="⬅️ Сменить программу", callback_data="change_prog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-# ===== START =====
 
 @dp.message(Command("start"))
 async def start(msg: Message, state: FSMContext):
@@ -142,8 +134,6 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
 
 
-# ===== ТРЕНИРОВКА =====
-
 @dp.callback_query(F.data.startswith("start_"))
 async def start_workout(call: CallbackQuery, state: FSMContext):
     saved = get_user_program(call.from_user.id)
@@ -169,7 +159,6 @@ async def send_current(message, state):
     key = f"{day['name']}|{ex_name}"
     last = get_last(message.chat.id, data["program"], key)
 
-    # Последний вес
     if last:
         last_str = " • ".join(f"{w}кг×{r}" for w, r, _ in last[:3])
         prev_line = f"\n📌 Прошлый раз: <b>{last_str}</b>"
@@ -423,8 +412,6 @@ async def show_record_actions(call: CallbackQuery):
     )
 
 
-# ===== ИЗМЕНИТЬ ВЕС/ПОВТОРЫ =====
-
 @dp.callback_query(F.data.startswith("editrec_"))
 async def edit_record(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
@@ -465,7 +452,7 @@ async def apply_edit(msg: Message, state: FSMContext):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ===== ПЕРЕНЕСТИ В ДРУГОЕ УПРАЖНЕНИЕ =====
+# ===== ПЕРЕНЕСТИ В ДРУГОЕ УПРАЖНЕНИЕ (короткие callback_data) =====
 
 @dp.callback_query(F.data.startswith("moverec_"))
 async def move_record(call: CallbackQuery, state: FSMContext):
@@ -473,14 +460,24 @@ async def move_record(call: CallbackQuery, state: FSMContext):
     set_id = int(parts[1])
     ex_idx = int(parts[2])
     names = _all_exercises(call.from_user.id)
+    if ex_idx >= len(names):
+        await call.answer("Ошибка")
+        return
     current = names[ex_idx]
     others = [n for n in names if n != current]
 
-    await state.update_data(move_set_id=set_id, move_from_idx=ex_idx, move_from_name=current)
+    # Сохраняем список целей в state — в callback_data кладём только индекс
+    await state.update_data(
+        move_set_id=set_id,
+        move_from_idx=ex_idx,
+        move_from_name=current,
+        move_targets=others,
+    )
 
-    rows = [[InlineKeyboardButton(text=n, callback_data=f"moveto_{ex_idx}_{n}")]
-            for n in others]
-    rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rec_{set_id}_{ex_idx}")])
+    rows = [[InlineKeyboardButton(text=n, callback_data=f"moveto_{i}")]
+            for i, n in enumerate(others)]
+    rows.append([InlineKeyboardButton(text="⬅️ Отмена",
+                                       callback_data=f"rec_{set_id}_{ex_idx}")])
     await call.message.edit_text(
         f"🔀 <b>Перенести запись</b>\n\n"
         f"Из: <b>{current}</b>\n\n"
@@ -491,19 +488,15 @@ async def move_record(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("moveto_"))
 async def apply_move(call: CallbackQuery, state: FSMContext):
-    # формат: moveto_<from_idx>_<target_name>
-    body = call.data[len("moveto_"):]
-    first_underscore = body.find("_")
-    from_idx = int(body[:first_underscore])
-    target_name = body[first_underscore + 1:]
-
+    idx = int(call.data.split("_", 1)[1])
     data = await state.get_data()
     set_id = data.get("move_set_id")
     from_name = data.get("move_from_name")
-
-    if not set_id:
-        await call.answer("Ошибка")
+    targets = data.get("move_targets") or []
+    if not set_id or idx >= len(targets):
+        await call.answer("Ошибка, попробуй заново", show_alert=True)
         return
+    target_name = targets[idx]
 
     move_set(call.from_user.id, set_id, target_name)
     await state.clear()
@@ -551,8 +544,6 @@ async def delete_record(call: CallbackQuery):
     text, kb = _render_history(name, rows, ex_idx)
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-
-# ===== ЗАПУСК =====
 
 async def main():
     init_db()
