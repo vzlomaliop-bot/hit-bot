@@ -113,6 +113,95 @@ async def debug_cmd(msg: Message):
     await msg.answer(text[:3900], parse_mode="HTML")
 
 
+@dp.message(Command("fixnone"))
+async def fixnone_cmd(msg: Message):
+    import sqlite3
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("""SELECT id, date, weight, reps, exercise, day_name
+                 FROM sets
+                 WHERE user_id=?
+                   AND (exercise LIKE '%|None' OR exercise LIKE '%|none')
+                 ORDER BY id ASC""", (msg.from_user.id,))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        await msg.answer("✅ Записей с None нет — всё в порядке.")
+        return
+
+    text = f"🔧 <b>Найдено {len(rows)} записей с «None»</b>\n\n"
+    for r in rows[:20]:
+        set_id, date, w, rp, ex, day = r
+        text += f"<code>#{set_id}</code> {date[:10]} — {w}кг × {rp} (день: {day})\n"
+    text += "\nЧтобы привязать запись — жми кнопку ниже и выбери, куда её перенести."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔧 Исправить по одной", callback_data="fixnone_start")],
+    ])
+    await msg.answer(text[:3900], reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "fixnone_start")
+async def fixnone_start(call: CallbackQuery, state: FSMContext):
+    import sqlite3
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("""SELECT id, date, weight, reps, exercise, day_name
+                 FROM sets
+                 WHERE user_id=?
+                   AND (exercise LIKE '%|None' OR exercise LIKE '%|none')
+                 ORDER BY id ASC""", (call.from_user.id,))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        await call.message.edit_text("✅ Все записи исправлены.")
+        return
+
+    # Берём первую и показываем
+    set_id, date, w, rp, ex, day = rows[0]
+    names = _all_exercises(call.from_user.id)
+
+    # Сохраняем список целей для этой записи в state
+    await state.update_data(
+        fix_set_id=set_id,
+        fix_targets=names,
+    )
+
+    buttons = [[InlineKeyboardButton(text=n, callback_data=f"fixto_{i}")]
+               for i, n in enumerate(names)]
+    await call.message.edit_text(
+        f"🔧 <b>Исправление записи #{set_id}</b>\n\n"
+        f"📅 {date[:10]}\n"
+        f"🏋️ {w} кг × {rp} повторов\n"
+        f"День: {day}\n\n"
+        f"К какому упражнению отнести эту запись?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("fixto_"))
+async def fixnone_apply(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split("_", 1)[1])
+    data = await state.get_data()
+    set_id = data.get("fix_set_id")
+    targets = data.get("fix_targets") or []
+    if not set_id or idx >= len(targets):
+        await call.answer("Ошибка, начни заново", show_alert=True)
+        return
+    target_name = targets[idx]
+
+    move_set(call.from_user.id, set_id, target_name)
+    await state.clear()
+
+    await call.message.edit_text(
+        f"✅ Запись #{set_id} перенесена в <b>{target_name}</b>\n\n"
+        f"Проверь, остались ли ещё — команда /fixnone.",
+        parse_mode="HTML",
+    )
+
+
 @dp.callback_query(F.data == "change_prog")
 async def change_prog(call: CallbackQuery, state: FSMContext):
     await state.clear()
