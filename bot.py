@@ -35,15 +35,15 @@ class EditFlow(StatesGroup):
 
 
 def _all_exercises(user_id):
+    """Упражнения из активной программы пользователя + те, что уже есть в БД."""
     names = set()
-    for prog in PROGRAMS.values():
-        for day in prog["days"]:
+    prog_key = get_user_program(user_id)
+    if prog_key and prog_key in PROGRAMS:
+        for day in PROGRAMS[prog_key]["days"]:
             for ex in day["exercises"]:
                 if ex.get("name"):
                     names.add(ex["name"])
-                for s in ex.get("substitutes", []) or []:
-                    if s:
-                        names.add(s)
+    # Добавляем те, что уже записаны в БД (могли быть из другой программы)
     for n in get_user_exercises(user_id):
         names.add(n)
     return sorted(names)
@@ -143,7 +143,7 @@ async def start_workout(call: CallbackQuery, state: FSMContext):
         return
     p = PROGRAMS[saved]
     day = p["days"][day_idx]
-    await state.update_data(program=saved, day=day_idx, ex=0, st=0, current_ex_name=None)
+    await state.update_data(program=saved, day=day_idx, ex=0, st=0)
     await call.message.edit_text(f"<b>{day['name']}</b>\n\nНачинаем 👇", parse_mode="HTML")
     await state.set_state(Workout.entering_set)
     await send_current(call.message, state)
@@ -155,7 +155,7 @@ async def send_current(message, state):
     day = p["days"][data["day"]]
     ex = day["exercises"][data["ex"]]
     st = data["st"]
-    ex_name = data.get("current_ex_name") or ex["name"]
+    ex_name = ex["name"]
     key = f"{day['name']}|{ex_name}"
     last = get_last(message.chat.id, data["program"], key)
 
@@ -173,53 +173,7 @@ async def send_current(message, state):
         f"Введи: <code>вес повторения</code>\n"
         f"Например: <code>80 8</code>"
     )
-    subs = ex.get("substitutes", [])
-    if subs:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Заменить упражнение", callback_data=f"sub_{data['ex']}")],
-        ])
-        await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await message.answer(text, parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("sub_"))
-async def substitute_exercise(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    p = PROGRAMS[data["program"]]
-    day = p["days"][data["day"]]
-    ex = day["exercises"][data["ex"]]
-    subs = ex.get("substitutes", [])
-    if not subs:
-        await call.answer("Нет замен")
-        return
-    rows = [[InlineKeyboardButton(text=s, callback_data=f"subsel_{i}")] for i, s in enumerate(subs)]
-    rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="subcancel")])
-    await call.message.edit_text(
-        f"Выбери замену для <b>{ex['name']}</b>:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data.startswith("subsel_"))
-async def select_substitute(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    idx = int(call.data.split("_")[1])
-    p = PROGRAMS[data["program"]]
-    day = p["days"][data["day"]]
-    ex = day["exercises"][data["ex"]]
-    subs = ex.get("substitutes", [])
-    if idx >= len(subs):
-        await call.answer("Ошибка")
-        return
-    await state.update_data(current_ex_name=subs[idx])
-    await call.message.edit_text(f"✅ Заменено на <b>{subs[idx]}</b>", parse_mode="HTML")
-    await send_current(call.message, state)
-
-
-@dp.callback_query(F.data == "subcancel")
-async def cancel_sub(call: CallbackQuery, state: FSMContext):
-    await send_current(call.message, state)
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Workout.entering_set)
@@ -236,8 +190,7 @@ async def log_set(msg: Message, state: FSMContext):
     p = PROGRAMS[data["program"]]
     day = p["days"][data["day"]]
     ex = day["exercises"][data["ex"]]
-    ex_name = data.get("current_ex_name") or ex["name"]
-    ex_name_safe = (ex_name or "").strip() or "Без названия"
+    ex_name_safe = (ex["name"] or "").strip() or "Без названия"
     key = f"{day['name']}|{ex_name_safe}"
     save_set(msg.from_user.id, data["program"], day["name"], key, data["st"] + 1, weight, reps)
 
@@ -260,7 +213,7 @@ async def log_set(msg: Message, state: FSMContext):
                 reply_markup=kb,
             )
             return
-        await state.update_data(ex=ex_i, st=0, current_ex_name=None)
+        await state.update_data(ex=ex_i, st=0)
         await msg.answer(f"✅ {weight}кг × {reps}\n\n➡️ Следующее упражнение")
         await send_current(msg, state)
     else:
@@ -343,7 +296,7 @@ def _render_history(name, rows, idx):
     return text, kb
 
 
-# ===== СПИСОК ЗАПИСЕЙ ДЛЯ РЕДАКТИРОВАНИЯ =====
+# ===== РЕДАКТИРОВАНИЕ ЗАПИСЕЙ =====
 
 @dp.callback_query(F.data.startswith("editlist_"))
 async def edit_list(call: CallbackQuery):
@@ -373,8 +326,6 @@ async def edit_list(call: CallbackQuery):
         parse_mode="HTML",
     )
 
-
-# ===== ДЕЙСТВИЯ С КОНКРЕТНОЙ ЗАПИСЬЮ =====
 
 @dp.callback_query(F.data.startswith("rec_"))
 async def show_record_actions(call: CallbackQuery):
@@ -452,8 +403,6 @@ async def apply_edit(msg: Message, state: FSMContext):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ===== ПЕРЕНЕСТИ В ДРУГОЕ УПРАЖНЕНИЕ (короткие callback_data) =====
-
 @dp.callback_query(F.data.startswith("moverec_"))
 async def move_record(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
@@ -466,7 +415,6 @@ async def move_record(call: CallbackQuery, state: FSMContext):
     current = names[ex_idx]
     others = [n for n in names if n != current]
 
-    # Сохраняем список целей в state — в callback_data кладём только индекс
     await state.update_data(
         move_set_id=set_id,
         move_from_idx=ex_idx,
@@ -517,8 +465,6 @@ async def apply_move(call: CallbackQuery, state: FSMContext):
     text, kb = _render_history(target_name, rows, new_idx)
     await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
-
-# ===== УДАЛИТЬ =====
 
 @dp.callback_query(F.data.startswith("delrec_"))
 async def delete_record(call: CallbackQuery):
