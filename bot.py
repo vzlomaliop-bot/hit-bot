@@ -69,7 +69,7 @@ def days_kb(program_key):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@dp.message(Command("start"))
+@dp.message(Command("start", ignore_case=True))
 async def start(msg: Message, state: FSMContext):
     await state.clear()
     saved = get_user_program(msg.from_user.id)
@@ -90,7 +90,7 @@ async def start(msg: Message, state: FSMContext):
         await msg.answer("Выбери программу тренировок:", reply_markup=programs_kb())
 
 
-@dp.message(Command("debug"))
+@dp.message(Command("debug", ignore_case=True))
 async def debug_cmd(msg: Message):
     import sqlite3
     conn = sqlite3.connect("workouts.db")
@@ -113,7 +113,7 @@ async def debug_cmd(msg: Message):
     await msg.answer(text[:3900], parse_mode="HTML")
 
 
-@dp.message(Command("fixnone"))
+@dp.message(Command("fixnone", ignore_case=True))
 async def fixnone_cmd(msg: Message):
     import sqlite3
     conn = sqlite3.connect("workouts.db")
@@ -158,11 +158,9 @@ async def fixnone_start(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text("✅ Все записи исправлены.")
         return
 
-    # Берём первую и показываем
     set_id, date, w, rp, ex, day = rows[0]
     names = _all_exercises(call.from_user.id)
 
-    # Сохраняем список целей для этой записи в state
     await state.update_data(
         fix_set_id=set_id,
         fix_targets=names,
@@ -374,13 +372,24 @@ async def show_exercise_history(call: CallbackQuery):
 
 def _render_history(name, rows, idx):
     by_date = OrderedDict()
-    for set_id, date, w, r, sn, ex, day_name in rows:
-        d = date[:10]
+    for row in rows:
+        try:
+            set_id, date, w, r, sn, ex, day_name = row[:7]
+        except (ValueError, TypeError):
+            continue
+        d = (date or "")[:10]
         if d not in by_date:
             by_date[d] = {"sets": [], "day": day_name or ""}
         by_date[d]["sets"].append((sn, w, r))
 
-    max_w = max(r[2] for r in rows)
+    if not by_date:
+        return (
+            f"📈 <b>{name}</b>\n\n<i>Нет корректных записей.</i>",
+            _kb_back("progress", "⬅️ К упражнениям"),
+        )
+
+    weights = [r[2] for r in rows if isinstance(r[2], (int, float))]
+    max_w = max(weights) if weights else 0
     last = rows[-1]
     lines = [
         f"📈 <b>{name}</b>", "",
@@ -595,6 +604,18 @@ async def delete_record(call: CallbackQuery):
         return
     text, kb = _render_history(name, rows, ex_idx)
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ===== FALLBACK — если сообщение вне тренировки =====
+
+@dp.message(F.text)
+async def fallback(msg: Message, state: FSMContext):
+    current = await state.get_state()
+    if current:
+        return
+    await msg.answer(
+        "🤔 Не понял. Нажми /start чтобы открыть меню."
+    )
 
 
 async def main():
