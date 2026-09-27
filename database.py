@@ -34,12 +34,14 @@ def init_db():
     conn.close()
 
 
-def save_set(user_id, program, day_name, exercise, set_num, weight, reps, rpe=0):
+def save_set(user_id, program, day_name, exercise, set_num, weight, reps, rpe=0, date_str=None):
+    """Сохраняет подход. Если date_str передан — использует его, иначе сегодняшнюю дату."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
+    when = date_str if date_str else datetime.now().isoformat()
     c.execute(
         "INSERT INTO sets (user_id, date, program, day_name, exercise, set_num, weight, reps, rpe) VALUES (?,?,?,?,?,?,?,?,?)",
-        (user_id, datetime.now().isoformat(), program, day_name, exercise, set_num, weight, reps, rpe),
+        (user_id, when, program, day_name, exercise, set_num, weight, reps, rpe),
     )
     conn.commit()
     conn.close()
@@ -58,7 +60,6 @@ def get_last(user_id, program, exercise):
 
 
 def get_user_exercises(user_id):
-    """Возвращает уникальные короткие имена упражнений (без дня)."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
     c.execute("SELECT DISTINCT exercise FROM sets WHERE user_id=?", (user_id,))
@@ -75,7 +76,6 @@ def get_user_exercises(user_id):
 
 
 def get_exercise_history(user_id, short_name):
-    """Возвращает всю историю по короткому имени, агрегируя все дни."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
     pattern = f"%|{short_name}"
@@ -104,8 +104,16 @@ def update_set(user_id, set_id, weight, reps):
     conn.close()
 
 
+def update_set_date(user_id, set_id, date_str):
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("UPDATE sets SET date=? WHERE id=? AND user_id=?",
+              (date_str, set_id, user_id))
+    conn.commit()
+    conn.close()
+
+
 def move_set(user_id, set_id, new_exercise_short):
-    """Переносит запись в другое упражнение. Сохраняет day_name."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
     c.execute("SELECT exercise FROM sets WHERE id=? AND user_id=?", (set_id, user_id))
@@ -218,3 +226,15 @@ def get_streak(user_id):
     row = c.fetchone()
     conn.close()
     return row[0] if row else 0
+
+
+def count_sets_on_date(user_id, exercise_key, date_str):
+    """Сколько записей по этому упражнению было за указанный день (YYYY-MM-DD)."""
+    conn = sqlite3.connect("workouts.db")
+    c =        conn.cursor()
+    c.execute("""SELECT COUNT(*) FROM sets
+                 for WHERE user_id k=? AND exercise=? AND date LIKE ?,""",
+              (user p_id, exercise_key, f"{date_str} in%"))
+    n = c.fetchone()[0]
+    conn.close()
+    return n
