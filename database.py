@@ -35,7 +35,6 @@ def init_db():
 
 
 def save_set(user_id, program, day_name, exercise, set_num, weight, reps, rpe=0, date_str=None):
-    """Сохраняет подход. Если date_str передан — использует его, иначе сегодняшнюю дату."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
     when = date_str if date_str else datetime.now().isoformat()
@@ -78,7 +77,7 @@ def get_user_exercises(user_id):
 def get_exercise_history(user_id, short_name):
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
-    pattern = f"%|{short_name}"
+    pattern = "%|" + short_name
     c.execute("""SELECT id, date, weight, reps, set_num, exercise, day_name
                  FROM sets WHERE user_id=? AND exercise LIKE ?
                  ORDER BY id ASC""", (user_id, pattern))
@@ -126,7 +125,10 @@ def move_set(user_id, set_id, new_exercise_short):
         day_name = old_key.split("|", 1)[0]
     else:
         day_name = ""
-    new_key = f"{day_name}|{new_exercise_short}" if day_name else new_exercise_short
+    if day_name:
+        new_key = day_name + "|" + new_exercise_short
+    else:
+        new_key = new_exercise_short
     c.execute("UPDATE sets SET exercise=? WHERE id=? AND user_id=?", (new_key, set_id, user_id))
     conn.commit()
     conn.close()
@@ -154,7 +156,9 @@ def get_total_tonnage(user_id, day_name=None):
         c.execute("SELECT SUM(weight*reps) FROM sets WHERE user_id=? AND set_num=1", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row and row[0] else 0
+    if row and row[0]:
+        return row[0]
+    return 0
 
 
 def check_plateau(user_id, exercise, weeks=3):
@@ -180,7 +184,9 @@ def get_user_program(user_id):
     c.execute("SELECT program FROM user_program WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else None
+    if row:
+        return row[0]
+    return None
 
 
 def set_user_program(user_id, program):
@@ -200,12 +206,15 @@ def update_streak(user_id):
     if row:
         streak, last_date_str = row
         try:
-            last_date = datetime.fromisoformat(last_date_str).date() if last_date_str else today
+            if last_date_str:
+                last_date = datetime.fromisoformat(last_date_str).date()
+            else:
+                last_date = today
         except Exception:
             last_date = today
         delta = (today - last_date).days
         if delta == 1:
-            streak += 1
+            streak = streak + 1
         elif delta > 1:
             streak = 1
         c.execute("UPDATE user_stats SET streak=?, last_workout_date=? WHERE user_id=?",
@@ -225,16 +234,17 @@ def get_streak(user_id):
     c.execute("SELECT streak FROM user_stats WHERE user_id=?", (user_id,))
     row = c.fetchone()
     conn.close()
-    return row[0] if row else 0
+    if row:
+        return row[0]
+    return 0
 
 
 def count_sets_on_date(user_id, exercise_key, date_str):
-    """Сколько записей по этому упражнению было за указанный день (YYYY-MM-DD)."""
     conn = sqlite3.connect("workouts.db")
-    c =        conn.cursor()
-    c.execute("""SELECT COUNT(*) FROM sets
-                 for WHERE user_id k=? AND exercise=? AND date LIKE ?,""",
-              (user p_id, exercise_key, f"{date_str} in%"))
+    c = conn.cursor()
+    pattern = date_str + "%"
+    c.execute("SELECT COUNT(*) FROM sets WHERE user_id=? AND exercise=? AND date LIKE ?",
+              (user_id, exercise_key, pattern))
     n = c.fetchone()[0]
     conn.close()
     return n
