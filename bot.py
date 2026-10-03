@@ -623,9 +623,8 @@ async def merge_start(call: CallbackQuery, state: FSMContext):
         return
     rows = []
     for i, n in enumerate(names):
-        # Показываем количество записей
         cnt = len(get_exercise_history(call.from_user.id, n))
-        rows.append([InlineKeyboardButton(text=f"{n} ({cnt})", callback_data=f"merge_from_{i}")])
+        rows.append([InlineKeyboardButton(text=f"{n} ({cnt})", callback_data=f"mergefrom_{i}")])
     rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="progress")])
     await state.update_data(merge_names=names)
     await call.message.edit_text(
@@ -639,9 +638,9 @@ async def merge_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(MergeFlow.choosing_from)
 
 
-@dp.callback_query(MergeFlow.choosing_from, F.data.startswith("merge_from_"))
+@dp.callback_query(MergeFlow.choosing_from, F.data.startswith("mergefrom_"))
 async def merge_choose_from(call: CallbackQuery, state: FSMContext):
-    idx = int(call.data.split("_", 1)[2])
+    idx = int(call.data.split("_")[1])
     data = await state.get_data()
     names = data.get("merge_names") or []
     if idx >= len(names):
@@ -651,7 +650,7 @@ async def merge_choose_from(call: CallbackQuery, state: FSMContext):
     await state.update_data(merge_from=from_name)
 
     others = [(i, n) for i, n in enumerate(names) if n != from_name]
-    rows = [[InlineKeyboardButton(text=n, callback_data=f"merge_to_{i}")]
+    rows = [[InlineKeyboardButton(text=n, callback_data=f"mergeto_{i}")]
             for i, n in others]
     rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="progress")])
     await state.update_data(merge_others=others)
@@ -666,9 +665,9 @@ async def merge_choose_from(call: CallbackQuery, state: FSMContext):
     await state.set_state(MergeFlow.choosing_to)
 
 
-@dp.callback_query(MergeFlow.choosing_to, F.data.startswith("merge_to_"))
+@dp.callback_query(MergeFlow.choosing_to, F.data.startswith("mergeto_"))
 async def merge_choose_to(call: CallbackQuery, state: FSMContext):
-    idx = int(call.data.split("_", 1)[2])
+    idx = int(call.data.split("_")[1])
     data = await state.get_data()
     others = data.get("merge_others") or []
     from_name = data.get("merge_from")
@@ -677,11 +676,9 @@ async def merge_choose_to(call: CallbackQuery, state: FSMContext):
         return
     _, to_name = others[idx]
 
-    # Считаем записи до
     before_from = len(get_exercise_history(call.from_user.id, from_name))
     before_to = len(get_exercise_history(call.from_user.id, to_name))
 
-    # Переносим
     moved = merge_exercises(call.from_user.id, from_name, to_name)
     await state.clear()
 
@@ -696,7 +693,6 @@ async def merge_choose_to(call: CallbackQuery, state: FSMContext):
         f"Перенесено: {moved}",
         parse_mode="HTML",
     )
-    # Показать результат
     names = _all_exercises(call.from_user.id)
     try:
         new_idx = names.index(to_name)
