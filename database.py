@@ -259,3 +259,22 @@ def count_sets_on_date(user_id, exercise_key, date_str):
     n = c.fetchone()[0]
     conn.close()
     return n
+def merge_exercises(user_id, from_name, to_name):
+    """Переименовывает все записи с from_name в to_name, сохраняя day_name."""
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    pattern = "%|" + from_name
+    c.execute("""SELECT id, exercise FROM sets
+                 WHERE user_id=? AND (exercise LIKE ? OR exercise = ?)""",
+              (user_id, pattern, from_name))
+    rows = c.fetchall()
+    for set_id, old_key in rows:
+        if "|" in old_key:
+            day_name = old_key.split("|", 1)[0]
+            new_key = day_name + "|" + to_name
+        else:
+            new_key = to_name
+        c.execute("UPDATE sets SET exercise=? WHERE id=?", (new_key, set_id))
+    conn.commit()
+    conn.close()
+    return len(rows)
