@@ -12,7 +12,7 @@ from aiogram.types import (
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
-from program import PROGRAMS
+from program import PROGRAMS, LEVELS
 from database import (
     init_db, save_set, get_last,
     get_user_exercises, get_exercise_history,
@@ -39,14 +39,26 @@ def is_owner(user):
     return (user.username or "").lower() == OWNER_USERNAME
 
 
-def visible_programs(user):
-    """Возвращает программы, доступные пользователю."""
+def visible_programs_for_level(level_key, user):
+    """Возвращает программы выбранного уровня, доступные пользователю."""
     out = {}
     for k, v in PROGRAMS.items():
+        if v.get("level") != level_key:
+            continue
         if k in HIDDEN_PROGRAMS and not is_owner(user):
             continue
         out[k] = v
     return out
+
+
+def has_hidden_program(user):
+    """Есть ли у пользователя доступ к скрытой программе."""
+    if not is_owner(user):
+        return False
+    for k in HIDDEN_PROGRAMS:
+        if k in PROGRAMS:
+            return True
+    return False
 
 
 # ═══════════════════════════════════════════
@@ -100,11 +112,32 @@ def _kb_back(cb, text="⬅️ Назад"):
     ])
 
 
-def programs_kb(user):
-    progs = visible_programs(user)
+def levels_kb(user):
+    """Первый уровень — выбор стиля тренировок."""
     buttons = []
-    for k, p in progs.items():
-        buttons.append([InlineKeyboardButton(text=p["title"], callback_data=f"prog_{k}")])
+    for key, info in LEVELS.items():
+        buttons.append([InlineKeyboardButton(
+            text=info["title"],
+            callback_data=f"level_{key}",
+        )])
+    if has_hidden_program(user):
+        buttons.append([InlineKeyboardButton(
+            text="🔥 HIT (для тебя)",
+            callback_data="prog_papirosov",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def programs_of_level_kb(level_key, user):
+    """Второй уровень — программы внутри выбранного стиля."""
+    progs = visible_programs_for_level(level_key, user)
+    buttons = []
+    for k, v in progs.items():
+        buttons.append([InlineKeyboardButton(
+            text=v["title"],
+            callback_data=f"prog_{k}",
+        )])
+    buttons.append([InlineKeyboardButton(text="⬅️ К стилям", callback_data="change_prog")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -140,7 +173,6 @@ def _parse_date(text):
 
 
 def _format_last_hint(last):
-    """Красиво показывает прошлый раз."""
     if not last:
         return "🕐 <i>Первый раз — начни с комфортного веса</i>"
     parts = []
@@ -159,7 +191,7 @@ async def start(msg: Message, state: FSMContext):
     name = msg.from_user.first_name or "друг"
     saved = get_user_program(msg.from_user.id)
 
-    if saved and saved in visible_programs(msg.from_user):
+    if saved and saved in PROGRAMS:
         p = PROGRAMS[saved]
         streak = get_streak(msg.from_user.id)
 
@@ -181,9 +213,9 @@ async def start(msg: Message, state: FSMContext):
     else:
         await msg.answer(
             f"👋 <b>Привет, {name}!</b>\n\n"
-            f"Это бот для отслеживания тренировок.\n"
-            f"Выбери свою программу и начнём 💪",
-            reply_markup=programs_kb(msg.from_user),
+            f"Это бот для отслеживания тренировок.\n\n"
+            f"<b>Выбери стиль тренировок:</b>",
+            reply_markup=levels_kb(msg.from_user),
             parse_mode="HTML",
         )
 
@@ -227,7 +259,6 @@ async def fixnone_cmd(msg: Message):
     for r in rows[:20]:
         set_id, d, w, rp, ex, day = r
         text += f"<code>#{set_id}</code> {d[:10]} — {w}кг × {rp} (день: {day})\n"
-    text += "\nЧтобы привязать запись — жми кнопку ниже."
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔧 Исправить по одной", callback_data="fixnone_start")],
     ])
@@ -283,16 +314,40 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
 
 
 # ═══════════════════════════════════════════
-# ВЫБОР ПРОГРАММЫ
+# ВЫБОР УРОВНЯ И ПРОГРАММЫ
 # ═══════════════════════════════════════════
 
 @dp.callback_query(F.data == "change_prog")
 async def change_prog(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(
-        "🏋️ <b>Выбери программу тренировок</b>\n\n"
-        "Каждая рассчитана под свой уровень и цель:",
-        reply_markup=programs_kb(call.from_user),
+        "🏋️ <b>Выбери стиль тренировок</b>\n\n"
+        "Каждый стиль — под свой опыт и объём нагрузки:",
+        reply_markup=levels_kb(call.from_user),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("level_"))
+async def choose_level(call: CallbackQuery, state: FSMContext):
+    level_key = call.data.split("_", 1)[1]
+    if level_key not in LEVELS:
+        await call.answer("Уровень не найден")
+        return
+    info = LEVELS[level_key]
+    progs = visible_programs_for_level(level_key, call.from_user)
+    if not progs:
+        await call.answer("В этом стиле пока нет программ", show_alert=True)
+        return
+
+    text = (
+        f"{info['title']}\n\n"
+        f"{info['note']}\n\n"
+        f"<b>Выбери программу ({len(progs)}):</b>"
+    )
+    await call.message.edit_text(
+        text,
+        reply_markup=programs_of_level_kb(level_key, call.from_user),
         parse_mode="HTML",
     )
 
@@ -331,7 +386,12 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         return
     day = p["days"][day_idx]
 
-    lines = [f"┌─────────────────────", f"│ 🗓 <b>{day['name']}</b>", f"└─────────────────────", ""]
+    lines = [
+        f"┌─────────────────────",
+        f"│ 🗓 <b>{day['name']}</b>",
+        f"└─────────────────────",
+        "",
+    ]
     for i, ex in enumerate(day["exercises"], 1):
         lines.append(
             f"<b>{i}.</b> {ex['name']}\n"
@@ -470,7 +530,7 @@ async def progress_cb(call: CallbackQuery):
         await call.message.edit_text(
             "📊 <b>Прогресс пуст</b>\n\n"
             "<i>Начни тренировку — здесь появится история по каждому упражнению.</i>",
-            reply_markup=_kb_back("change_prog", "⬅️ К программам"),
+            reply_markup=_kb_back("change_prog", "⬅️ К стилям"),
             parse_mode="HTML",
         )
         return
