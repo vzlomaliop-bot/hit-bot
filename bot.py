@@ -16,7 +16,7 @@ from program import PROGRAMS, LEVELS
 from database import (
     init_db, save_set, get_last,
     get_user_exercises, get_exercise_history,
-    delete_set, update_set, update_set_date, move_set,
+    delete_set, update_set, update_set_date, move_set, merge_exercises,
     get_user_program, set_user_program,
     update_streak, get_streak,
     get_total_tonnage, count_sets_on_date,
@@ -40,7 +40,6 @@ def is_owner(user):
 
 
 def visible_programs_for_level(level_key, user):
-    """Возвращает программы выбранного уровня, доступные пользователю."""
     out = {}
     for k, v in PROGRAMS.items():
         if v.get("level") != level_key:
@@ -52,7 +51,6 @@ def visible_programs_for_level(level_key, user):
 
 
 def has_hidden_program(user):
-    """Есть ли у пользователя доступ к скрытой программе."""
     if not is_owner(user):
         return False
     for k in HIDDEN_PROGRAMS:
@@ -77,6 +75,11 @@ class EditFlow(StatesGroup):
 class AddRecord(StatesGroup):
     entering_date = State()
     entering_value = State()
+
+
+class MergeFlow(StatesGroup):
+    choosing_from = State()
+    choosing_to = State()
 
 
 # ═══════════════════════════════════════════
@@ -113,7 +116,6 @@ def _kb_back(cb, text="⬅️ Назад"):
 
 
 def levels_kb(user):
-    """Первый уровень — выбор стиля тренировок."""
     buttons = []
     for key, info in LEVELS.items():
         buttons.append([InlineKeyboardButton(
@@ -129,7 +131,6 @@ def levels_kb(user):
 
 
 def programs_of_level_kb(level_key, user):
-    """Второй уровень — программы внутри выбранного стиля."""
     progs = visible_programs_for_level(level_key, user)
     buttons = []
     for k, v in progs.items():
@@ -194,16 +195,11 @@ async def start(msg: Message, state: FSMContext):
     if saved and saved in PROGRAMS:
         p = PROGRAMS[saved]
         streak = get_streak(msg.from_user.id)
-
         header = f"💪 <b>Привет, {name}!</b>\n\n"
-        card = (
-            f"┌─────────────────────\n"
-            f"│ 🎯 <b>{p['title']}</b>\n"
-        )
+        card = f"┌─────────────────────\n│ 🎯 <b>{p['title']}</b>\n"
         if streak > 1:
             card += f"│ 🔥 Стрик: <b>{streak}</b> тренировок\n"
         card += f"└─────────────────────"
-
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Продолжить тренировку", callback_data=f"prog_{saved}")],
             [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
@@ -339,7 +335,6 @@ async def choose_level(call: CallbackQuery, state: FSMContext):
     if not progs:
         await call.answer("В этом стиле пока нет программ", show_alert=True)
         return
-
     text = (
         f"{info['title']}\n\n"
         f"{info['note']}\n\n"
@@ -385,7 +380,6 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         await call.answer("День не найден")
         return
     day = p["days"][day_idx]
-
     lines = [
         f"┌─────────────────────",
         f"│ 🗓 <b>{day['name']}</b>",
@@ -399,7 +393,6 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         )
     lines.append("")
     lines.append(f"⚡ <i>Всего упражнений: {len(day['exercises'])}</i>")
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 НАЧАТЬ ТРЕНИРОВКУ", callback_data=f"start_{day_idx}")],
         [InlineKeyboardButton(text="⬅️ К дням", callback_data=f"prog_{saved}")],
@@ -438,11 +431,9 @@ async def send_current(message, state):
     ex_name = ex["name"]
     key = f"{day['name']}|{ex_name}"
     last = get_last(message.chat.id, data["program"], key)
-
     progress = f"{st + 1}/{ex['sets']}"
     total_ex = len(day["exercises"])
     ex_num = data["ex"] + 1
-
     text = (
         f"┌─────────────────────\n"
         f"│ 🎯 <b>{ex_name}</b>\n"
@@ -536,6 +527,7 @@ async def progress_cb(call: CallbackQuery):
         return
     rows = [[InlineKeyboardButton(text=name, callback_data=f"ex_{i}")]
             for i, name in enumerate(names)]
+    rows.append([InlineKeyboardButton(text="🔗 Объединить упражнения", callback_data="merge_start")])
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="change_prog")])
     await call.message.edit_text(
         f"📊 <b>Твой прогресс</b>\n\n"
@@ -620,6 +612,104 @@ def _render_history(name, rows, idx):
 
 
 # ═══════════════════════════════════════════
+# ОБЪЕДИНЕНИЕ УПРАЖНЕНИЙ
+# ═══════════════════════════════════════════
+
+@dp.callback_query(F.data == "merge_start")
+async def merge_start(call: CallbackQuery, state: FSMContext):
+    names = _all_exercises(call.from_user.id)
+    if len(names) < 2:
+        await call.answer("Нужно минимум 2 упражнения", show_alert=True)
+        return
+    rows = []
+    for i, n in enumerate(names):
+        # Показываем количество записей
+        cnt = len(get_exercise_history(call.from_user.id, n))
+        rows.append([InlineKeyboardButton(text=f"{n} ({cnt})", callback_data=f"merge_from_{i}")])
+    rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="progress")])
+    await state.update_data(merge_names=names)
+    await call.message.edit_text(
+        "🔗 <b>Объединение упражнений</b>\n\n"
+        "Все записи одного упражнения переносятся в другое.\n\n"
+        "<b>Шаг 1.</b> Какое упражнение переносим?\n\n"
+        "<i>Выбери то, которое нужно удалить (в скобках — сколько записей):</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await state.set_state(MergeFlow.choosing_from)
+
+
+@dp.callback_query(MergeFlow.choosing_from, F.data.startswith("merge_from_"))
+async def merge_choose_from(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split("_", 1)[2])
+    data = await state.get_data()
+    names = data.get("merge_names") or []
+    if idx >= len(names):
+        await call.answer("Ошибка")
+        return
+    from_name = names[idx]
+    await state.update_data(merge_from=from_name)
+
+    others = [(i, n) for i, n in enumerate(names) if n != from_name]
+    rows = [[InlineKeyboardButton(text=n, callback_data=f"merge_to_{i}")]
+            for i, n in others]
+    rows.append([InlineKeyboardButton(text="⬅️ Отмена", callback_data="progress")])
+    await state.update_data(merge_others=others)
+    await call.message.edit_text(
+        f"🔗 <b>Объединение</b>\n\n"
+        f"Переносим: <b>{from_name}</b>\n\n"
+        f"<b>Шаг 2.</b> В какое упражнение перенести?\n\n"
+        f"<i>Выбери итоговое (в него пойдут все записи):</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+    await state.set_state(MergeFlow.choosing_to)
+
+
+@dp.callback_query(MergeFlow.choosing_to, F.data.startswith("merge_to_"))
+async def merge_choose_to(call: CallbackQuery, state: FSMContext):
+    idx = int(call.data.split("_", 1)[2])
+    data = await state.get_data()
+    others = data.get("merge_others") or []
+    from_name = data.get("merge_from")
+    if idx >= len(others):
+        await call.answer("Ошибка")
+        return
+    _, to_name = others[idx]
+
+    # Считаем записи до
+    before_from = len(get_exercise_history(call.from_user.id, from_name))
+    before_to = len(get_exercise_history(call.from_user.id, to_name))
+
+    # Переносим
+    moved = merge_exercises(call.from_user.id, from_name, to_name)
+    await state.clear()
+
+    after_to = len(get_exercise_history(call.from_user.id, to_name))
+
+    await call.message.edit_text(
+        f"✅ <b>Объединено</b>\n\n"
+        f"Из: <b>{from_name}</b> ({before_from} записей)\n"
+        f"В: <b>{to_name}</b>\n\n"
+        f"Было у цели: {before_to}\n"
+        f"Стало у цели: {after_to}\n"
+        f"Перенесено: {moved}",
+        parse_mode="HTML",
+    )
+    # Показать результат
+    names = _all_exercises(call.from_user.id)
+    try:
+        new_idx = names.index(to_name)
+    except ValueError:
+        return
+    rows = get_exercise_history(call.from_user.id, to_name)
+    if not rows:
+        return
+    text, kb = _render_history(to_name, rows, new_idx)
+    await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+# ═══════════════════════════════════════════
 # ДОБАВИТЬ ЗАПИСЬ
 # ═══════════════════════════════════════════
 
@@ -633,7 +723,6 @@ async def add_record_start(call: CallbackQuery, state: FSMContext):
     name = names[idx]
     await state.update_data(add_idx=idx, add_name=name)
     await state.set_state(AddRecord.entering_date)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Сегодня", callback_data="addrec_today")],
         [InlineKeyboardButton(text="📅 Вчера", callback_data="addrec_yesterday")],
@@ -720,7 +809,6 @@ async def add_record_apply(msg: Message, state: FSMContext):
     except (ValueError, IndexError):
         await msg.answer("❌ Формат: <code>80 8</code>", parse_mode="HTML")
         return
-
     data = await state.get_data()
     name = data.get("add_name")
     iso = data.get("add_date") or date.today().isoformat()
@@ -728,15 +816,12 @@ async def add_record_apply(msg: Message, state: FSMContext):
         await msg.answer("Что-то потерялось, начни заново: 📊 Прогресс")
         await state.clear()
         return
-
     prog_key = get_user_program(msg.from_user.id)
     day_name = _find_day_for_exercise(prog_key, name)
     key = f"{day_name}|{name}" if day_name else name
-
     set_num = count_sets_on_date(msg.from_user.id, key, iso) + 1
     save_set(msg.from_user.id, prog_key or "", day_name, key, set_num, weight, reps, date_str=iso)
     await state.clear()
-
     await msg.answer(
         f"✅ <b>Добавлено</b>\n\n"
         f"🎯 {name}\n"
@@ -744,7 +829,6 @@ async def add_record_apply(msg: Message, state: FSMContext):
         f"🏋️ {weight} кг × {reps}",
         parse_mode="HTML",
     )
-
     names = _all_exercises(msg.from_user.id)
     try:
         new_idx = names.index(name)
