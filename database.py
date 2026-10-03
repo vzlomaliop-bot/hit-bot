@@ -75,12 +75,16 @@ def get_user_exercises(user_id):
 
 
 def get_exercise_history(user_id, short_name):
+    """Ищет записи и с '|' в ключе, и без него — на случай старых записей."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
-    pattern = "%|" + short_name
+    pattern_with_day = "%|" + short_name
     c.execute("""SELECT id, date, weight, reps, set_num, exercise, day_name
-                 FROM sets WHERE user_id=? AND exercise LIKE ?
-                 ORDER BY id ASC""", (user_id, pattern))
+                 FROM sets
+                 WHERE user_id=?
+                   AND (exercise LIKE ? OR exercise = ?)
+                 ORDER BY id ASC""",
+              (user_id, pattern_with_day, short_name))
     rows = c.fetchall()
     conn.close()
     return rows
@@ -240,11 +244,18 @@ def get_streak(user_id):
 
 
 def count_sets_on_date(user_id, exercise_key, date_str):
+    """Считает подходы за день. Работает и с ключом '|', и без него."""
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
     pattern = date_str + "%"
-    c.execute("SELECT COUNT(*) FROM sets WHERE user_id=? AND exercise=? AND date LIKE ?",
-              (user_id, exercise_key, pattern))
+    # Ищем и по точному ключу, и по ключу с днём
+    short = exercise_key.split("|")[-1] if "|" in exercise_key else exercise_key
+    pattern_with_day = "%|" + short
+    c.execute("""SELECT COUNT(*) FROM sets
+                 WHERE user_id=?
+                   AND (exercise = ? OR exercise LIKE ?)
+                   AND date LIKE ?""",
+              (user_id, exercise_key, pattern_with_day, pattern))
     n = c.fetchone()[0]
     conn.close()
     return n
