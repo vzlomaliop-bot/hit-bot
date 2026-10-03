@@ -27,6 +27,32 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 
+# ═══════════════════════════════════════════
+# ОСОБЫЕ ПОЛЬЗОВАТЕЛИ
+# ═══════════════════════════════════════════
+
+OWNER_USERNAME = "papirosovv"
+HIDDEN_PROGRAMS = ["papirosov"]
+
+
+def is_owner(user):
+    return (user.username or "").lower() == OWNER_USERNAME
+
+
+def visible_programs(user):
+    """Возвращает программы, доступные пользователю."""
+    out = {}
+    for k, v in PROGRAMS.items():
+        if k in HIDDEN_PROGRAMS and not is_owner(user):
+            continue
+        out[k] = v
+    return out
+
+
+# ═══════════════════════════════════════════
+# FSM
+# ═══════════════════════════════════════════
+
 class Workout(StatesGroup):
     entering_set = State()
 
@@ -40,6 +66,10 @@ class AddRecord(StatesGroup):
     entering_date = State()
     entering_value = State()
 
+
+# ═══════════════════════════════════════════
+# ХЕЛПЕРЫ
+# ═══════════════════════════════════════════
 
 def _all_exercises(user_id):
     names = set()
@@ -70,11 +100,12 @@ def _kb_back(cb, text="⬅️ Назад"):
     ])
 
 
-def programs_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=p["title"], callback_data=f"prog_{k}")]
-        for k, p in PROGRAMS.items()
-    ])
+def programs_kb(user):
+    progs = visible_programs(user)
+    buttons = []
+    for k, p in progs.items():
+        buttons.append([InlineKeyboardButton(text=p["title"], callback_data=f"prog_{k}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def days_kb(program_key):
@@ -82,62 +113,79 @@ def days_kb(program_key):
     rows = [[InlineKeyboardButton(text=d["name"], callback_data=f"day_{i}")]
             for i, d in enumerate(p["days"])]
     rows.append([InlineKeyboardButton(text="📊 Прогресс", callback_data="progress")])
-    rows.append([InlineKeyboardButton(text="⬅️ Сменить программу", callback_data="change_prog")])
+    rows.append([InlineKeyboardButton(text="⬅️ К программам", callback_data="change_prog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-# ===== ХЕЛПЕРЫ ДЛЯ ДАТЫ =====
-
 def _parse_date(text):
-    """Парсит дату из текста. Возвращает YYYY-MM-DD или None."""
     text = text.strip().lower()
-
     if text in ("сегодня", "today", "с"):
         return date.today().isoformat()
-
     if text in ("вчера", "вч", "yesterday"):
         from datetime import timedelta
         return (date.today() - timedelta(days=1)).isoformat()
-
-    # Форматы: 26.09, 26.09.2026, 2026-09-26, 26/09, 26-09
     for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d.%m.%y", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             d = datetime.strptime(text, fmt).date()
             return d.isoformat()
         except ValueError:
             pass
-
     for fmt in ("%d.%m", "%d/%m", "%d-%m"):
         try:
             d = datetime.strptime(text, fmt).date()
             return d.replace(year=date.today().year).isoformat()
         except ValueError:
             pass
-
     return None
 
 
-# ===== START / СЕРВИСНЫЕ КОМАНДЫ =====
+def _format_last_hint(last):
+    """Красиво показывает прошлый раз."""
+    if not last:
+        return "🕐 <i>Первый раз — начни с комфортного веса</i>"
+    parts = []
+    for w, r, _ in last[:3]:
+        parts.append(f"<code>{w}×{r}</code>")
+    return "📌 Прошлый раз: " + " · ".join(parts)
+
+
+# ═══════════════════════════════════════════
+# СТАРТ
+# ═══════════════════════════════════════════
 
 @dp.message(Command("start", ignore_case=True))
 async def start(msg: Message, state: FSMContext):
     await state.clear()
+    name = msg.from_user.first_name or "друг"
     saved = get_user_program(msg.from_user.id)
-    if saved and saved in PROGRAMS:
+
+    if saved and saved in visible_programs(msg.from_user):
         p = PROGRAMS[saved]
         streak = get_streak(msg.from_user.id)
-        streak_text = f"\n🔥 Стрик: {streak}" if streak > 1 else ""
+
+        header = f"💪 <b>Привет, {name}!</b>\n\n"
+        card = (
+            f"┌─────────────────────\n"
+            f"│ 🎯 <b>{p['title']}</b>\n"
+        )
+        if streak > 1:
+            card += f"│ 🔥 Стрик: <b>{streak}</b> тренировок\n"
+        card += f"└─────────────────────"
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="▶️ Продолжить", callback_data=f"prog_{saved}")],
-            [InlineKeyboardButton(text="📊 Прогресс", callback_data="progress")],
+            [InlineKeyboardButton(text="▶️ Продолжить тренировку", callback_data=f"prog_{saved}")],
+            [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
             [InlineKeyboardButton(text="🔄 Сменить программу", callback_data="change_prog")],
         ])
-        await msg.answer(
-            f"Твоя программа: <b>{p['title']}</b>{streak_text}\n\n{p['note']}",
-            reply_markup=kb, parse_mode="HTML",
-        )
+        await msg.answer(header + card, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer("Выбери программу тренировок:", reply_markup=programs_kb())
+        await msg.answer(
+            f"👋 <b>Привет, {name}!</b>\n\n"
+            f"Это бот для отслеживания тренировок.\n"
+            f"Выбери свою программу и начнём 💪",
+            reply_markup=programs_kb(msg.from_user),
+            parse_mode="HTML",
+        )
 
 
 @dp.message(Command("debug", ignore_case=True))
@@ -234,10 +282,19 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
     )
 
 
+# ═══════════════════════════════════════════
+# ВЫБОР ПРОГРАММЫ
+# ═══════════════════════════════════════════
+
 @dp.callback_query(F.data == "change_prog")
 async def change_prog(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("Выбери программу:", reply_markup=programs_kb())
+    await call.message.edit_text(
+        "🏋️ <b>Выбери программу тренировок</b>\n\n"
+        "Каждая рассчитана под свой уровень и цель:",
+        reply_markup=programs_kb(call.from_user),
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(F.data.startswith("prog_"))
@@ -246,12 +303,19 @@ async def choose_program(call: CallbackQuery, state: FSMContext):
     if key not in PROGRAMS:
         await call.answer("Программа не найдена")
         return
+    if key in HIDDEN_PROGRAMS and not is_owner(call.from_user):
+        await call.answer("⛔ Программа недоступна", show_alert=True)
+        return
     set_user_program(call.from_user.id, key)
     p = PROGRAMS[key]
-    await call.message.edit_text(
-        f"<b>{p['title']}</b>\n\n{p['note']}\n\nВыбери день:",
-        reply_markup=days_kb(key), parse_mode="HTML",
+    text = (
+        f"┌─────────────────────\n"
+        f"│ {p['title']}\n"
+        f"└─────────────────────\n\n"
+        f"📝 {p['note']}\n\n"
+        f"🗓 <b>Выбери тренировочный день:</b>"
     )
+    await call.message.edit_text(text, reply_markup=days_kb(key), parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("day_"))
@@ -266,12 +330,19 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         await call.answer("День не найден")
         return
     day = p["days"][day_idx]
-    lines = [f"<b>{day['name']}</b>", ""]
-    for ex in day["exercises"]:
-        lines.append(f"• {ex['name']} — {ex['sets']}×{ex['reps']}, RIR {ex['rir']}")
+
+    lines = [f"┌─────────────────────", f"│ 🗓 <b>{day['name']}</b>", f"└─────────────────────", ""]
+    for i, ex in enumerate(day["exercises"], 1):
+        lines.append(
+            f"<b>{i}.</b> {ex['name']}\n"
+            f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}"
+        )
+    lines.append("")
+    lines.append(f"⚡ <i>Всего упражнений: {len(day['exercises'])}</i>")
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Начать тренировку", callback_data=f"start_{day_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"prog_{saved}")],
+        [InlineKeyboardButton(text="🔥 НАЧАТЬ ТРЕНИРОВКУ", callback_data=f"start_{day_idx}")],
+        [InlineKeyboardButton(text="⬅️ К дням", callback_data=f"prog_{saved}")],
     ])
     await call.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
 
@@ -286,7 +357,14 @@ async def start_workout(call: CallbackQuery, state: FSMContext):
     p = PROGRAMS[saved]
     day = p["days"][day_idx]
     await state.update_data(program=saved, day=day_idx, ex=0, st=0)
-    await call.message.edit_text(f"<b>{day['name']}</b>\n\nНачинаем 👇", parse_mode="HTML")
+    await call.message.edit_text(
+        f"┌─────────────────────\n"
+        f"│ 🏋️ <b>{day['name']}</b>\n"
+        f"│ Тренировка началась\n"
+        f"└─────────────────────\n\n"
+        f"<i>Следуй инструкциям бота и вводи результат после каждого подхода.</i>",
+        parse_mode="HTML",
+    )
     await state.set_state(Workout.entering_set)
     await send_current(call.message, state)
 
@@ -301,19 +379,20 @@ async def send_current(message, state):
     key = f"{day['name']}|{ex_name}"
     last = get_last(message.chat.id, data["program"], key)
 
-    if last:
-        last_str = " • ".join(f"{w}кг×{r}" for w, r, _ in last[:3])
-        prev_line = f"\n📌 Прошлый раз: <b>{last_str}</b>"
-    else:
-        prev_line = "\n📌 Прошлый раз: <i>нет данных</i>"
+    progress = f"{st + 1}/{ex['sets']}"
+    total_ex = len(day["exercises"])
+    ex_num = data["ex"] + 1
 
     text = (
-        f"<b>{ex_name}</b>\n"
-        f"Подход {st + 1} из {ex['sets']}\n"
-        f"🎯 {ex['reps']} повторов, RIR {ex['rir']}"
-        f"{prev_line}\n\n"
-        f"Введи: <code>вес повторения</code>\n"
-        f"Например: <code>80 8</code>"
+        f"┌─────────────────────\n"
+        f"│ 🎯 <b>{ex_name}</b>\n"
+        f"│ Упражнение {ex_num} из {total_ex}\n"
+        f"└─────────────────────\n\n"
+        f"🔹 <b>Подход {progress}</b>\n"
+        f"🎯 {ex['reps']} повторов • RIR {ex['rir']}\n"
+        f"{_format_last_hint(last)}\n\n"
+        f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
+        f"<code>80 8</code>"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -325,7 +404,12 @@ async def log_set(msg: Message, state: FSMContext):
         weight = float(parts[0])
         reps = int(parts[1])
     except (ValueError, IndexError):
-        await msg.answer("❌ Формат: <code>80 8</code>", parse_mode="HTML")
+        await msg.answer(
+            "❌ <b>Не понял формат</b>\n\n"
+            "Введи вес и повторы через пробел:\n"
+            "<code>80 8</code>",
+            parse_mode="HTML",
+        )
         return
 
     data = await state.get_data()
@@ -346,41 +430,59 @@ async def log_set(msg: Message, state: FSMContext):
             tonnage = get_total_tonnage(msg.from_user.id, day["name"])
             await state.clear()
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Прогресс", callback_data="progress")],
+                [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
                 [InlineKeyboardButton(text="🔁 К дням", callback_data=f"prog_{prog_key}")],
             ])
             await msg.answer(
-                f"🎉 Тренировка завершена!\n\n🔥 Стрик: {streak}\n"
-                f"🏋️ Тоннаж: {tonnage:,.0f} кг\n📊 Последнее: {weight}кг × {reps}",
+                f"╔═══════════════════════╗\n"
+                f"║   🎉 ТРЕНИРОВКА ГОТОВА   ║\n"
+                f"╚═══════════════════════╝\n\n"
+                f"✅ Подходов: <b>{sum(e['sets'] for e in day['exercises'])}</b>\n"
+                f"🔥 Стрик: <b>{streak}</b>\n"
+                f"🏋️ Тоннаж: <b>{tonnage:,.0f} кг</b>\n\n"
+                f"<i>Отличная работа! Восстанавливайся и возвращайся 💪</i>",
                 reply_markup=kb,
+                parse_mode="HTML",
             )
             return
         await state.update_data(ex=ex_i, st=0)
-        await msg.answer(f"✅ {weight}кг × {reps}\n\n➡️ Следующее упражнение")
+        next_ex = day["exercises"][ex_i]
+        await msg.answer(
+            f"✅ <b>{weight} кг × {reps}</b>\n\n"
+            f"➡️ Следующее: <b>{next_ex['name']}</b>",
+            parse_mode="HTML",
+        )
         await send_current(msg, state)
     else:
         await state.update_data(st=st)
-        await msg.answer(f"✅ {weight}кг × {reps}")
+        await msg.answer(f"✅ <b>{weight} кг × {reps}</b>", parse_mode="HTML")
         await send_current(msg, state)
 
 
-# ===== ПРОГРЕСС =====
+# ═══════════════════════════════════════════
+# ПРОГРЕСС
+# ═══════════════════════════════════════════
 
 @dp.callback_query(F.data == "progress")
 async def progress_cb(call: CallbackQuery):
     names = _all_exercises(call.from_user.id)
     if not names:
         await call.message.edit_text(
-            "📊 Пока нет упражнений.",
-            reply_markup=_kb_back("change_prog"),
+            "📊 <b>Прогресс пуст</b>\n\n"
+            "<i>Начни тренировку — здесь появится история по каждому упражнению.</i>",
+            reply_markup=_kb_back("change_prog", "⬅️ К программам"),
+            parse_mode="HTML",
         )
         return
     rows = [[InlineKeyboardButton(text=name, callback_data=f"ex_{i}")]
             for i, name in enumerate(names)]
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="change_prog")])
     await call.message.edit_text(
-        f"📊 <b>Твой прогресс</b>\n\nВыбери упражнение ({len(names)} шт.):",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
+        f"📊 <b>Твой прогресс</b>\n\n"
+        f"Выбери упражнение для просмотра истории\n"
+        f"<i>(всего: {len(names)})</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
     )
 
 
@@ -400,7 +502,7 @@ async def show_exercise_history(call: CallbackQuery):
         ])
         await call.message.edit_text(
             f"📈 <b>{name}</b>\n\n"
-            f"<i>Пока нет записей по этому упражнению.</i>\n\n"
+            f"🕐 <i>Пока нет записей по этому упражнению.</i>\n\n"
             f"Выполни его на тренировке или добавь вручную.",
             reply_markup=kb, parse_mode="HTML",
         )
@@ -432,28 +534,34 @@ def _render_history(name, rows, idx):
     max_w = max(weights) if weights else 0
     last = rows[-1]
     lines = [
-        f"📈 <b>{name}</b>", "",
-        f"🔹 Рекорд: <b>{max_w} кг</b>",
-        f"🔹 Последний: {last[2]} кг × {last[3]}",
-        f"🔹 Тренировок: {len(by_date)}", "",
-        "<b>История:</b>",
+        f"📈 <b>{name}</b>",
+        "",
+        f"┌─────────────────────",
+        f"│ 🏆 Рекорд: <b>{max_w} кг</b>",
+        f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>",
+        f"│ 🗓 Тренировок: <b>{len(by_date)}</b>",
+        f"└─────────────────────",
+        "",
+        "<b>📅 История:</b>",
     ]
     for d, ddata in by_date.items():
-        sets_str = " • ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
+        sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
         lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
-        lines.append(f"<code>{d}</code>{lbl}: {sets_str}")
+        lines.append(f"<code>{d}</code>{lbl}\n   └ {sets_str}")
     text = "\n".join(lines)
     if len(text) > 3400:
         text = text[:3300] + "\n...<i>(обрезано)</i>"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить запись", callback_data=f"addrec_{idx}")],
-        [InlineKeyboardButton(text="✏️ Редактировать записи", callback_data=f"editlist_{idx}")],
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"editlist_{idx}")],
         [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
     ])
     return text, kb
 
 
-# ===== ДОБАВИТЬ ЗАПИСЬ ВРУЧНУЮ =====
+# ═══════════════════════════════════════════
+# ДОБАВИТЬ ЗАПИСЬ
+# ═══════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("addrec_"))
 async def add_record_start(call: CallbackQuery, state: FSMContext):
@@ -473,10 +581,10 @@ async def add_record_start(call: CallbackQuery, state: FSMContext):
     ])
     await call.message.edit_text(
         f"➕ <b>Добавить запись</b>\n\n"
-        f"<b>{name}</b>\n\n"
+        f"🎯 <b>{name}</b>\n\n"
         f"<b>Шаг 1.</b> За какую дату?\n\n"
-        f"• Нажми <b>📅 Сегодня</b> или <b>📅 Вчера</b>\n"
-        f"• Или введи вручную: <code>25.09</code>, <code>26.09.2026</code>, <code>2026-09-26</code>",
+        f"Нажми кнопку или введи вручную:\n"
+        f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
         reply_markup=kb, parse_mode="HTML",
     )
 
@@ -484,7 +592,6 @@ async def add_record_start(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "addrec_today")
 async def add_rec_today(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    idx = data.get("add_idx")
     name = data.get("add_name")
     if name is None:
         await call.answer("Ошибка")
@@ -493,8 +600,10 @@ async def add_rec_today(call: CallbackQuery, state: FSMContext):
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await call.message.edit_text(
-        f"➕ <b>{name}</b>\n📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторения через пробел: <code>80 8</code>",
+        f"➕ <b>{name}</b>\n"
+        f"📅 {iso}\n\n"
+        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
+        f"<code>80 8</code>",
         parse_mode="HTML",
     )
 
@@ -503,7 +612,6 @@ async def add_rec_today(call: CallbackQuery, state: FSMContext):
 async def add_rec_yesterday(call: CallbackQuery, state: FSMContext):
     from datetime import timedelta
     data = await state.get_data()
-    idx = data.get("add_idx")
     name = data.get("add_name")
     if name is None:
         await call.answer("Ошибка")
@@ -512,8 +620,10 @@ async def add_rec_yesterday(call: CallbackQuery, state: FSMContext):
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await call.message.edit_text(
-        f"➕ <b>{name}</b>\n📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторения через пробел: <code>80 8</code>",
+        f"➕ <b>{name}</b>\n"
+        f"📅 {iso}\n\n"
+        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
+        f"<code>80 8</code>",
         parse_mode="HTML",
     )
 
@@ -524,8 +634,7 @@ async def add_record_date(msg: Message, state: FSMContext):
     if not iso:
         await msg.answer(
             "❌ Не понял дату.\n\n"
-            "Попробуй: <code>25.09</code>, <code>26.09.2026</code>, <code>2026-09-26</code>\n"
-            "Или нажми 📅 Сегодня.",
+            "Попробуй: <code>25.09</code>, <code>26.09.2026</code>, <code>2026-09-26</code>",
             parse_mode="HTML",
         )
         return
@@ -534,8 +643,10 @@ async def add_record_date(msg: Message, state: FSMContext):
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await msg.answer(
-        f"➕ <b>{name}</b>\n📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторения: <code>80 8</code>",
+        f"➕ <b>{name}</b>\n"
+        f"📅 {iso}\n\n"
+        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
+        f"<code>80 8</code>",
         parse_mode="HTML",
     )
 
@@ -551,7 +662,6 @@ async def add_record_apply(msg: Message, state: FSMContext):
         return
 
     data = await state.get_data()
-    idx = data.get("add_idx")
     name = data.get("add_name")
     iso = data.get("add_date") or date.today().isoformat()
     if name is None:
@@ -568,7 +678,10 @@ async def add_record_apply(msg: Message, state: FSMContext):
     await state.clear()
 
     await msg.answer(
-        f"✅ Добавлено: <b>{name}</b>\n📅 {iso}\n🏋️ {weight} кг × {reps}",
+        f"✅ <b>Добавлено</b>\n\n"
+        f"🎯 {name}\n"
+        f"📅 {iso}\n"
+        f"🏋️ {weight} кг × {reps}",
         parse_mode="HTML",
     )
 
@@ -584,7 +697,9 @@ async def add_record_apply(msg: Message, state: FSMContext):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ===== РЕДАКТИРОВАНИЕ ЗАПИСЕЙ =====
+# ═══════════════════════════════════════════
+# РЕДАКТИРОВАНИЕ
+# ═══════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("editlist_"))
 async def edit_list(call: CallbackQuery):
@@ -602,12 +717,13 @@ async def edit_list(call: CallbackQuery):
     buttons = []
     for set_id, d, w, r, sn, ex, day_name in reversed(display):
         dkey = d[:10]
-        label = f"{dkey} • {w}кг×{r}"
+        label = f"{dkey} • {w}кг × {r}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"rec_{set_id}_{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex_{idx}")])
     await call.message.edit_text(
-        f"✏️ <b>{name}</b>\n\nВыбери запись для изменения "
-        f"(показаны последние {len(display)} из {len(rows)}):",
+        f"✏️ <b>{name}</b>\n\n"
+        f"Выбери запись для изменения\n"
+        f"<i>(показаны последние {len(display)} из {len(rows)})</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
@@ -634,18 +750,20 @@ async def show_record_actions(call: CallbackQuery):
         return
     _, d, w, r, sn, ex, day_name = target
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Изменить вес/повторы", callback_data=f"editrec_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="📅 Изменить дату", callback_data=f"editdate_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="🔀 Перенести в др. упражнение", callback_data=f"moverec_{set_id}_{ex_idx}")],
+        [InlineKeyboardButton(text="✏️ Вес/повторы", callback_data=f"editrec_{set_id}_{ex_idx}")],
+        [InlineKeyboardButton(text="📅 Дату", callback_data=f"editdate_{set_id}_{ex_idx}")],
+        [InlineKeyboardButton(text="🔀 В др. упражнение", callback_data=f"moverec_{set_id}_{ex_idx}")],
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delrec_{set_id}_{ex_idx}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"editlist_{ex_idx}")],
     ])
     await call.message.edit_text(
         f"📝 <b>{name}</b>\n\n"
-        f"📅 {d[:10]}\n"
-        f"🏋️ {w} кг × {r} повторений\n"
-        f"Подход №{sn}\n\n"
-        f"Что делаем?",
+        f"┌─────────────────────\n"
+        f"│ 📅 {d[:10]}\n"
+        f"│ 🏋️ {w} кг × {r} повторов\n"
+        f"│ Подход №{sn}\n"
+        f"└─────────────────────\n\n"
+        f"<b>Что делаем?</b>",
         reply_markup=kb, parse_mode="HTML",
     )
 
@@ -660,9 +778,9 @@ async def edit_record(call: CallbackQuery, state: FSMContext):
     await state.update_data(edit_set_id=set_id, edit_ex_idx=ex_idx, edit_name=name)
     await state.set_state(EditFlow.entering_new)
     await call.message.edit_text(
-        f"✏️ <b>Изменение веса/повторов</b>\n\n<b>{name}</b>\n\n"
-        f"Введи новые значения: <code>вес повторения</code>\n"
-        f"Например: <code>85 8</code>",
+        f"✏️ <b>Изменение веса/повторов</b>\n\n"
+        f"🎯 <b>{name}</b>\n\n"
+        f"Введи новые значения: <code>85 8</code>",
         parse_mode="HTML",
     )
 
@@ -684,11 +802,9 @@ async def apply_edit(msg: Message, state: FSMContext):
     await state.clear()
     rows = get_exercise_history(msg.from_user.id, name)
     text, kb = _render_history(name, rows, ex_idx)
-    await msg.answer(f"✅ Записано: {weight} кг × {reps}")
+    await msg.answer(f"✅ <b>Записано:</b> {weight} кг × {reps}", parse_mode="HTML")
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
-
-# ===== ИЗМЕНИТЬ ДАТУ ЗАПИСИ =====
 
 @dp.callback_query(F.data.startswith("editdate_"))
 async def edit_date(call: CallbackQuery, state: FSMContext):
@@ -700,15 +816,16 @@ async def edit_date(call: CallbackQuery, state: FSMContext):
     await state.update_data(editdate_set_id=set_id, editdate_ex_idx=ex_idx,
                             editdate_name=name)
     await state.set_state(EditFlow.entering_date)
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Сегодня", callback_data=f"setdate_today_{set_id}_{ex_idx}")],
         [InlineKeyboardButton(text="📅 Вчера", callback_data=f"setdate_yest_{set_id}_{ex_idx}")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"rec_{set_id}_{ex_idx}")],
     ])
     await call.message.edit_text(
-        f"📅 <b>Изменить дату</b>\n\n<b>{name}</b>\n\n"
-        f"Выбери или введи вручную: <code>25.09</code>, <code>26.09.2026</code>, <code>2026-09-26</code>",
+        f"📅 <b>Изменить дату</b>\n\n"
+        f"🎯 <b>{name}</b>\n\n"
+        f"Выбери или введи вручную:\n"
+        f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
         reply_markup=kb, parse_mode="HTML",
     )
 
@@ -717,7 +834,6 @@ async def edit_date(call: CallbackQuery, state: FSMContext):
 async def set_date_quick(call: CallbackQuery, state: FSMContext):
     from datetime import timedelta
     parts = call.data.split("_")
-    # setdate_today_SETID_EXIDX или setdate_yest_SETID_EXIDX
     mode = parts[1]
     set_id = int(parts[2])
     ex_idx = int(parts[3])
@@ -725,7 +841,6 @@ async def set_date_quick(call: CallbackQuery, state: FSMContext):
         iso = date.today().isoformat()
     else:
         iso = (date.today() - timedelta(days=1)).isoformat()
-
     update_set_date(call.from_user.id, set_id, iso)
     await state.clear()
     names = _all_exercises(call.from_user.id)
@@ -761,8 +876,6 @@ async def apply_date(msg: Message, state: FSMContext):
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ===== ПЕРЕНЕСТИ ЗАПИСЬ =====
-
 @dp.callback_query(F.data.startswith("moverec_"))
 async def move_record(call: CallbackQuery, state: FSMContext):
     parts = call.data.split("_")
@@ -781,7 +894,9 @@ async def move_record(call: CallbackQuery, state: FSMContext):
     rows.append([InlineKeyboardButton(text="⬅️ Отмена",
                                        callback_data=f"rec_{set_id}_{ex_idx}")])
     await call.message.edit_text(
-        f"🔀 <b>Перенести запись</b>\n\nИз: <b>{current}</b>\n\nКуда перенести?",
+        f"🔀 <b>Перенести запись</b>\n\n"
+        f"Из: <b>{current}</b>\n\n"
+        f"Куда перенести?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
     )
 
@@ -800,7 +915,9 @@ async def apply_move(call: CallbackQuery, state: FSMContext):
     move_set(call.from_user.id, set_id, target_name)
     await state.clear()
     await call.message.edit_text(
-        f"✅ Запись перенесена:\nИз <b>{from_name}</b> → в <b>{target_name}</b>",
+        f"✅ <b>Перенесено</b>\n\n"
+        f"Из: {from_name}\n"
+        f"В: <b>{target_name}</b>",
         parse_mode="HTML",
     )
     names = _all_exercises(call.from_user.id)
@@ -842,14 +959,20 @@ async def delete_record(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
-# ===== FALLBACK =====
+# ═══════════════════════════════════════════
+# FALLBACK
+# ═══════════════════════════════════════════
 
 @dp.message(F.text)
 async def fallback(msg: Message, state: FSMContext):
     current = await state.get_state()
     if current:
         return
-    await msg.answer("🤔 Не понял. Нажми /start чтобы открыть меню.")
+    await msg.answer(
+        "🤔 <b>Не понял команду</b>\n\n"
+        "Нажми /start чтобы открыть меню.",
+        parse_mode="HTML",
+    )
 
 
 async def main():
