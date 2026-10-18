@@ -177,8 +177,9 @@ def _format_last_hint(last):
     if not last:
         return "🕐 <i>Первый раз — начни с комфортного веса</i>"
     parts = []
-    for w, r, _ in last[:3]:
-        parts.append(f"<code>{w}×{r}</code>")
+    for w, r, _ in last[:6]:
+        w_str = f"{w:g}" if isinstance(w, (int, float)) else str(w)
+        parts.append(f"<code>{w_str}×{r}</code>")
     return "📌 Прошлый раз: " + " · ".join(parts)
 
 
