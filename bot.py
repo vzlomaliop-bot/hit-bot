@@ -410,7 +410,7 @@ async def start_workout(call: CallbackQuery, state: FSMContext):
         return
     p = PROGRAMS[saved]
     day = p["days"][day_idx]
-    await state.update_data(program=saved, day=day_idx, ex=0, st=0)
+    await state.update_data(program=saved, day=day_idx, ex=0, st=0, done_sets=0)
     await call.message.edit_text(
         f"┌─────────────────────\n"
         f"│ 🏋️ <b>{day['name']}</b>\n"
@@ -435,6 +435,23 @@ async def send_current(message, state):
     progress = f"{st + 1}/{ex['sets']}"
     total_ex = len(day["exercises"])
     ex_num = data["ex"] + 1
+
+    if st == 0:
+        ex_btn = InlineKeyboardButton(
+            text="⏭ Пропустить упражнение",
+            callback_data="wk_skip_ex",
+        )
+    else:
+        ex_btn = InlineKeyboardButton(
+            text="⏭ Закончить упражнение раньше",
+            callback_data="wk_finish_ex",
+        )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [ex_btn],
+        [InlineKeyboardButton(text="🏁 Завершить тренировку досрочно", callback_data="wk_finish_all")],
+    ])
+
     text = (
         f"┌─────────────────────\n"
         f"│ 🎯 <b>{ex_name}</b>\n"
@@ -446,7 +463,91 @@ async def send_current(message, state):
         f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
         f"<code>80 8</code>"
     )
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def _finish_workout(message: Message, user_id: int, state: FSMContext, early: bool = False):
+    data = await state.get_data()
+    prog_key = data["program"]
+    p = PROGRAMS[prog_key]
+    day = p["days"][data["day"]]
+    done_sets = data.get("done_sets", 0)
+    await state.clear()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
+        [InlineKeyboardButton(text="🔁 К дням", callback_data=f"prog_{prog_key}")],
+    ])
+
+    if done_sets == 0:
+        await message.answer(
+            "⏹ <b>Тренировка отменена</b>\n\n"
+            "<i>Ни одного подхода не было записано.</i>",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        return
+
+    streak = update_streak(user_id)
+    tonnage = get_total_tonnage(user_id, day["name"])
+    header_title = "🏁 ТРЕНИРОВКА ЗАВЕРШЕНА" if early else "🎉 ТРЕНИРОВКА ГОТОВА"
+
+    await message.answer(
+        f"╔═══════════════════════╗\n"
+        f"║  {header_title}  ║\n"
+        f"╚═══════════════════════╝\n\n"
+        f"✅ Подходов: <b>{done_sets}</b>\n"
+        f"🔥 Стрик: <b>{streak}</b>\n"
+        f"🏋️ Тоннаж: <b>{tonnage:,.0f} кг</b>\n\n"
+        f"<i>Отличная работа! Восстанавливайся и возвращайся 💪</i>",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(Workout.entering_set, F.data.in_({"wk_skip_ex", "wk_finish_ex"}))
+async def skip_or_finish_exercise(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    p = PROGRAMS[data["program"]]
+    day = p["days"][data["day"]]
+    cur_ex = day["exercises"][data["ex"]]
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    action_label = "⏭ Пропущено" if call.data == "wk_skip_ex" else "✅ Завершено досрочно"
+    ex_i = data["ex"] + 1
+
+    if ex_i >= len(day["exercises"]):
+        await call.message.answer(
+            f"{action_label}: <b>{cur_ex['name']}</b>",
+            parse_mode="HTML",
+        )
+        await _finish_workout(call.message, call.from_user.id, state, early=False)
+        await call.answer()
+        return
+
+    await state.update_data(ex=ex_i, st=0)
+    next_ex = day["exercises"][ex_i]
+    await call.message.answer(
+        f"{action_label}: <b>{cur_ex['name']}</b>\n\n"
+        f"➡️ Следующее: <b>{next_ex['name']}</b>",
+        parse_mode="HTML",
+    )
+    await send_current(call.message, state)
+    await call.answer()
+
+
+@dp.callback_query(Workout.entering_set, F.data == "wk_finish_all")
+async def finish_workout_early(call: CallbackQuery, state: FSMContext):
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _finish_workout(call.message, call.from_user.id, state, early=True)
+    await call.answer()
 
 
 @dp.message(Workout.entering_set)
@@ -472,42 +573,27 @@ async def log_set(msg: Message, state: FSMContext):
     key = f"{day['name']}|{ex_name_safe}"
     save_set(msg.from_user.id, data["program"], day["name"], key, data["st"] + 1, weight, reps)
 
+    done_sets = data.get("done_sets", 0) + 1
     st = data["st"] + 1
+    await state.update_data(done_sets=done_sets)
+
     if st >= ex["sets"]:
         ex_i = data["ex"] + 1
-        st = 0
         if ex_i >= len(day["exercises"]):
-            prog_key = data["program"]
-            streak = update_streak(msg.from_user.id)
-            tonnage = get_total_tonnage(msg.from_user.id, day["name"])
-            await state.clear()
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
-                [InlineKeyboardButton(text="🔁 К дням", callback_data=f"prog_{prog_key}")],
-            ])
-            await msg.answer(
-                f"╔═══════════════════════╗\n"
-                f"║   🎉 ТРЕНИРОВКА ГОТОВА   ║\n"
-                f"╚═══════════════════════╝\n\n"
-                f"✅ Подходов: <b>{sum(e['sets'] for e in day['exercises'])}</b>\n"
-                f"🔥 Стрик: <b>{streak}</b>\n"
-                f"🏋️ Тоннаж: <b>{tonnage:,.0f} кг</b>\n\n"
-                f"<i>Отличная работа! Восстанавливайся и возвращайся 💪</i>",
-                reply_markup=kb,
-                parse_mode="HTML",
-            )
+            await msg.answer(f"✅ <b>{weight:g} кг × {reps}</b>", parse_mode="HTML")
+            await _finish_workout(msg, msg.from_user.id, state, early=False)
             return
         await state.update_data(ex=ex_i, st=0)
         next_ex = day["exercises"][ex_i]
         await msg.answer(
-            f"✅ <b>{weight} кг × {reps}</b>\n\n"
+            f"✅ <b>{weight:g} кг × {reps}</b>\n\n"
             f"➡️ Следующее: <b>{next_ex['name']}</b>",
             parse_mode="HTML",
         )
         await send_current(msg, state)
     else:
         await state.update_data(st=st)
-        await msg.answer(f"✅ <b>{weight} кг × {reps}</b>", parse_mode="HTML")
+        await msg.answer(f"✅ <b>{weight:g} кг × {reps}</b>", parse_mode="HTML")
         await send_current(msg, state)
 
 
