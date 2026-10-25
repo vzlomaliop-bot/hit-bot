@@ -184,7 +184,7 @@ def _format_last_hint(last):
 
 
 # ═══════════════════════════════════════════
-# СТАРТ
+# КОМАНДЫ (СТАРТ, DEBUG, FIXNONE, EXPORT)
 # ═══════════════════════════════════════════
 
 @dp.message(Command("start", ignore_case=True))
@@ -314,10 +314,6 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
 # ЭКСПОРТ ПОЛНОЙ ИСТОРИИ
 # ═══════════════════════════════════════════
 
-# ═══════════════════════════════════════════
-# ЭКСПОРТ ПОЛНОЙ ИСТОРИИ
-# ═══════════════════════════════════════════
-
 @dp.message(Command("export", ignore_case=True))
 async def export_cmd(msg: Message):
     import sqlite3
@@ -355,7 +351,6 @@ async def export_cmd(msg: Message):
         await msg.answer("Нет подходящих записей для экспорта.")
         return
 
-    # Собираем историю блоками, чтобы не рвать HTML-теги
     messages = []
     current_chunk = "📊 <b>Полная история тренировок</b>\n"
 
@@ -364,8 +359,7 @@ async def export_cmd(msg: Message):
         for d, sets in dates.items():
             sets_str = " · ".join(sets)
             block += f"<code>{d}</code>: {sets_str}\n"
-        
-        # Если блок не влезает в лимит 3500 символов — начинаем новое сообщение
+            
         if len(current_chunk) + len(block) > 3500:
             messages.append(current_chunk)
             current_chunk = block
@@ -1170,7 +1164,7 @@ async def delete_record(call: CallbackQuery):
 
 
 # ═══════════════════════════════════════════
-# FALLBACK
+# FALLBACK (ДОЛЖЕН БЫТЬ В САМОМ КОНЦЕ!)
 # ═══════════════════════════════════════════
 
 @dp.message(F.text)
