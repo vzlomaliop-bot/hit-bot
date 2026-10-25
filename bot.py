@@ -314,13 +314,20 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
 # ЭКСПОРТ ПОЛНОЙ ИСТОРИИ
 # ═══════════════════════════════════════════
 
+# ═══════════════════════════════════════════
+# ЭКСПОРТ ПОЛНОЙ ИСТОРИИ
+# ═══════════════════════════════════════════
+
 @dp.message(Command("export", ignore_case=True))
 async def export_cmd(msg: Message):
     import sqlite3
     
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
-    c.execute("SELECT exercise, date, weight, reps FROM sets WHERE user_id=? ORDER BY id ASC", (msg.from_user.id,))
+    c.execute(
+        "SELECT exercise, date, weight, reps FROM sets WHERE user_id=? ORDER BY id ASC", 
+        (msg.from_user.id,)
+    )
     rows = c.fetchall()
     conn.close()
     
@@ -330,31 +337,46 @@ async def export_cmd(msg: Message):
 
     data = {}
     for ex_key, d, w, r in rows:
-        if not ex_key: continue
-        name = ex_key.split("|")[-1].strip()
-        if name.lower() in ("none", "null", "nan", "0"): continue
+        if not ex_key:
+            continue
+        name = str(ex_key).split("|")[-1].strip()
+        if name.lower() in ("none", "null", "nan", "0"):
+            continue
         
         if name not in data:
             data[name] = OrderedDict()
         
-        dkey = d[:10]
+        dkey = str(d)[:10]
         if dkey not in data[name]:
             data[name][dkey] = []
         data[name][dkey].append(f"{w}×{r}")
         
-    lines = ["📊 <b>Полная история тренировок</b>\n"]
-    
+    if not data:
+        await msg.answer("Нет подходящих записей для экспорта.")
+        return
+
+    # Собираем историю блоками, чтобы не рвать HTML-теги
+    messages = []
+    current_chunk = "📊 <b>Полная история тренировок</b>\n"
+
     for name, dates in sorted(data.items()):
-        lines.append(f"\n🔹 <b>{name}</b>")
+        block = f"\n🔹 <b>{name}</b>\n"
         for d, sets in dates.items():
             sets_str = " · ".join(sets)
-            lines.append(f"<code>{d}</code>: {sets_str}")
-            
-    text = "\n".join(lines)
-    
-    # Разбиваем длинный текст на сообщения по 4000 символов
-    for i in range(0, len(text), 4000):
-        await msg.answer(text[i:i+4000], parse_mode="HTML")
+            block += f"<code>{d}</code>: {sets_str}\n"
+        
+        # Если блок не влезает в лимит 3500 символов — начинаем новое сообщение
+        if len(current_chunk) + len(block) > 3500:
+            messages.append(current_chunk)
+            current_chunk = block
+        else:
+            current_chunk += block
+
+    if current_chunk:
+        messages.append(current_chunk)
+
+    for chunk in messages:
+        await msg.answer(chunk, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════
