@@ -1,26 +1,39 @@
 import asyncio
+import html
 import os
 from collections import OrderedDict
 from datetime import date, datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-)
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-
-from program import PROGRAMS, LEVELS
-from database import (
-    init_db, save_set, get_last,
-    get_user_exercises, get_exercise_history,
-    delete_set, update_set, update_set_date, move_set, merge_exercises,
-    get_user_program, set_user_program,
-    update_streak, get_streak,
-    get_total_tonnage, count_sets_on_date,
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
 )
+
+from database import (
+    count_sets_on_date,
+    delete_set,
+    get_exercise_history,
+    get_last,
+    get_streak,
+    get_total_tonnage,
+    get_user_exercises,
+    get_user_program,
+    init_db,
+    merge_exercises,
+    move_set,
+    save_set,
+    set_user_program,
+    update_set,
+    update_set_date,
+    update_streak,
+)
+from program import LEVELS, PROGRAMS
 
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
@@ -31,12 +44,15 @@ dp = Dispatcher()
 # ОСОБЫЕ ПОЛЬЗОВАТЕЛИ
 # ═══════════════════════════════════════════
 
-OWNER_USERNAME = "papirosovv"
+OWNER_USERNAMES = ["papirosovv", "lactucoideae"]
 HIDDEN_PROGRAMS = ["papirosov"]
 
 
 def is_owner(user):
-    return (user.username or "").lower() == OWNER_USERNAME
+    if not user:
+        return False
+    username = (user.username or "").lower()
+    return username in [u.lower() for u in OWNER_USERNAMES]
 
 
 def visible_programs_for_level(level_key, user):
@@ -188,18 +204,22 @@ def _format_last_hint(last):
 
 @dp.message(Command("start", ignore_case=True))
 async def start(msg: Message, state: FSMContext):
+    if not msg.from_user:
+        return
     await state.clear()
-    name = msg.from_user.first_name or "друг"
-    saved = get_user_program(msg.from_user.id)
+    name = html.escape(msg.from_user.first_name or "друг")
+    user_id = msg.from_user.id
+    saved = get_user_program(user_id)
 
     if saved and saved in PROGRAMS:
         p = PROGRAMS[saved]
-        streak = get_streak(msg.from_user.id)
+        streak = get_streak(user_id)
+        prog_title = html.escape(p['title'])
         header = f"💪 <b>Привет, {name}!</b>\n\n"
-        card = f"┌─────────────────────\n│ 🎯 <b>{p['title']}</b>\n"
+        card = f"┌─────────────────────\n│ 🎯 <b>{prog_title}</b>\n"
         if streak > 1:
             card += f"│ 🔥 Стрик: <b>{streak}</b> тренировок\n"
-        card += f"└─────────────────────"
+        card += "└─────────────────────"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Продолжить тренировку", callback_data=f"prog_{saved}")],
             [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
@@ -218,6 +238,8 @@ async def start(msg: Message, state: FSMContext):
 
 @dp.message(Command("debug", ignore_case=True))
 async def debug_cmd(msg: Message):
+    if not msg.from_user:
+        return
     import sqlite3
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
@@ -226,16 +248,21 @@ async def debug_cmd(msg: Message):
     c.execute("SELECT DISTINCT exercise FROM sets WHERE user_id=?", (msg.from_user.id,))
     rows = c.fetchall()
     conn.close()
+    
+    prog_key = get_user_program(msg.from_user.id)
+    prog_key_safe = html.escape(str(prog_key)) if prog_key else "нет"
     text = f"📊 <b>Debug</b>\n\nВсего записей: <b>{total}</b>\n"
-    text += f"Активная: {get_user_program(msg.from_user.id)}\n\n"
+    text += f"Активная: {prog_key_safe}\n\n"
     text += f"<b>Уникальных exercise ({len(rows)}):</b>\n"
     for r in rows[:40]:
-        text += f"• <code>{r[0]}</code>\n"
+        text += f"• <code>{html.escape(str(r[0]))}</code>\n"
     await msg.answer(text[:3900], parse_mode="HTML")
 
 
 @dp.message(Command("fixnone", ignore_case=True))
 async def fixnone_cmd(msg: Message):
+    if not msg.from_user:
+        return
     import sqlite3
     conn = sqlite3.connect("workouts.db")
     c = conn.cursor()
@@ -254,7 +281,8 @@ async def fixnone_cmd(msg: Message):
     text = f"🔧 <b>Найдено {len(rows)} записей с «None»</b>\n\n"
     for r in rows[:20]:
         set_id, d, w, rp, ex, day = r
-        text += f"<code>#{set_id}</code> {d[:10]} — {w}кг × {rp} (день: {day})\n"
+        day_safe = html.escape(str(day or ""))
+        text += f"<code>#{set_id}</code> {d[:10]} — {w}кг × {rp} (день: {day_safe})\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔧 Исправить по одной", callback_data="fixnone_start")],
     ])
@@ -281,9 +309,10 @@ async def fixnone_start(call: CallbackQuery, state: FSMContext):
     await state.update_data(fix_set_id=set_id, fix_targets=names)
     buttons = [[InlineKeyboardButton(text=n, callback_data=f"fixto_{i}")]
                for i, n in enumerate(names)]
+    day_safe = html.escape(str(day or ""))
     await call.message.edit_text(
         f"🔧 <b>Исправление записи #{set_id}</b>\n\n"
-        f"📅 {d[:10]}\n🏋️ {w} кг × {rp} повторов\nДень: {day}\n\n"
+        f"📅 {d[:10]}\n🏋️ {w} кг × {rp} повторов\nДень: {day_safe}\n\n"
         f"К какому упражнению отнести эту запись?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
@@ -303,10 +332,60 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
     move_set(call.from_user.id, set_id, target_name)
     await state.clear()
     await call.message.edit_text(
-        f"✅ Запись #{set_id} перенесена в <b>{target_name}</b>\n\n"
+        f"✅ Запись #{set_id} перенесена в <b>{html.escape(target_name)}</b>\n\n"
         f"Проверь, остались ли ещё — /fixnone.",
         parse_mode="HTML",
     )
+
+
+# ═══════════════════════════════════════════
+# ЭКСПОРТ ПОЛНОЙ ИСТОРИИ
+# ═══════════════════════════════════════════
+
+@dp.message(Command("export", ignore_case=True))
+async def export_cmd(msg: Message):
+    if not msg.from_user:
+        return
+    import sqlite3
+    
+    conn = sqlite3.connect("workouts.db")
+    c = conn.cursor()
+    c.execute("SELECT exercise, date, weight, reps FROM sets WHERE user_id=? ORDER BY id ASC", (msg.from_user.id,))
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows:
+        await msg.answer("В базе пока нет записей.")
+        return
+
+    data = {}
+    for ex_key, d, w, r in rows:
+        if not ex_key:
+            continue
+        name = ex_key.split("|")[-1].strip()
+        if name.lower() in ("none", "null", "nan", "0"):
+            continue
+        
+        if name not in data:
+            data[name] = OrderedDict()
+        
+        dkey = d[:10]
+        if dkey not in data[name]:
+            data[name][dkey] = []
+        data[name][dkey].append(f"{w}×{r}")
+        
+    lines = ["📊 <b>Полная история тренировок</b>\n"]
+    
+    for name, dates in sorted(data.items()):
+        lines.append(f"\n🔹 <b>{html.escape(name)}</b>")
+        for d, sets in dates.items():
+            sets_str = " · ".join(sets)
+            lines.append(f"<code>{d}</code>: {sets_str}")
+            
+    text = "\n".join(lines)
+    
+    for i in range(0, len(text), 4000):
+        await msg.answer(text[i:i+4000], parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════
@@ -360,9 +439,9 @@ async def choose_program(call: CallbackQuery, state: FSMContext):
     p = PROGRAMS[key]
     text = (
         f"┌─────────────────────\n"
-        f"│ {p['title']}\n"
+        f"│ {html.escape(p['title'])}\n"
         f"└─────────────────────\n\n"
-        f"📝 {p['note']}\n\n"
+        f"📝 {html.escape(p['note'])}\n\n"
         f"🗓 <b>Выбери тренировочный день:</b>"
     )
     await call.message.edit_text(text, reply_markup=days_kb(key), parse_mode="HTML")
@@ -381,14 +460,14 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         return
     day = p["days"][day_idx]
     lines = [
-        f"┌─────────────────────",
-        f"│ 🗓 <b>{day['name']}</b>",
-        f"└─────────────────────",
+        "┌─────────────────────",
+        f"│ 🗓 <b>{html.escape(day['name'])}</b>",
+        "└─────────────────────",
         "",
     ]
     for i, ex in enumerate(day["exercises"], 1):
         lines.append(
-            f"<b>{i}.</b> {ex['name']}\n"
+            f"<b>{i}.</b> {html.escape(ex['name'])}\n"
             f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}"
         )
     lines.append("")
@@ -412,7 +491,7 @@ async def start_workout(call: CallbackQuery, state: FSMContext):
     await state.update_data(program=saved, day=day_idx, ex=0, st=0)
     await call.message.edit_text(
         f"┌─────────────────────\n"
-        f"│ 🏋️ <b>{day['name']}</b>\n"
+        f"│ 🏋️ <b>{html.escape(day['name'])}</b>\n"
         f"│ Тренировка началась\n"
         f"└─────────────────────\n\n"
         f"<i>Следуй инструкциям бота и вводи результат после каждого подхода.</i>",
@@ -436,7 +515,7 @@ async def send_current(message, state):
     ex_num = data["ex"] + 1
     text = (
         f"┌─────────────────────\n"
-        f"│ 🎯 <b>{ex_name}</b>\n"
+        f"│ 🎯 <b>{html.escape(ex_name)}</b>\n"
         f"│ Упражнение {ex_num} из {total_ex}\n"
         f"└─────────────────────\n\n"
         f"🔹 <b>Подход {progress}</b>\n"
@@ -450,6 +529,8 @@ async def send_current(message, state):
 
 @dp.message(Workout.entering_set)
 async def log_set(msg: Message, state: FSMContext):
+    if not msg.from_user or not msg.text:
+        return
     try:
         parts = msg.text.replace(",", ".").split()
         weight = float(parts[0])
@@ -500,7 +581,7 @@ async def log_set(msg: Message, state: FSMContext):
         next_ex = day["exercises"][ex_i]
         await msg.answer(
             f"✅ <b>{weight} кг × {reps}</b>\n\n"
-            f"➡️ Следующее: <b>{next_ex['name']}</b>",
+            f"➡️ Следующее: <b>{html.escape(next_ex['name'])}</b>",
             parse_mode="HTML",
         )
         await send_current(msg, state)
@@ -553,7 +634,7 @@ async def show_exercise_history(call: CallbackQuery):
             [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
         ])
         await call.message.edit_text(
-            f"📈 <b>{name}</b>\n\n"
+            f"📈 <b>{html.escape(name)}</b>\n\n"
             f"🕐 <i>Пока нет записей по этому упражнению.</i>\n\n"
             f"Выполни его на тренировке или добавь вручную.",
             reply_markup=kb, parse_mode="HTML",
@@ -576,7 +657,7 @@ def _render_history(name, rows, idx):
         by_date[dkey]["sets"].append((sn, w, r))
     if not by_date:
         return (
-            f"📈 <b>{name}</b>\n\n<i>Нет корректных записей.</i>",
+            f"📈 <b>{html.escape(name)}</b>\n\n<i>Нет корректных записей.</i>",
             InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ Добавить запись", callback_data=f"addrec_{idx}")],
                 [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
@@ -585,20 +666,21 @@ def _render_history(name, rows, idx):
     weights = [r[2] for r in rows if isinstance(r[2], (int, float))]
     max_w = max(weights) if weights else 0
     last = rows[-1]
+    name_safe = html.escape(name)
     lines = [
-        f"📈 <b>{name}</b>",
+        f"📈 <b>{name_safe}</b>",
         "",
-        f"┌─────────────────────",
+        "┌─────────────────────",
         f"│ 🏆 Рекорд: <b>{max_w} кг</b>",
         f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>",
         f"│ 🗓 Тренировок: <b>{len(by_date)}</b>",
-        f"└─────────────────────",
+        "└─────────────────────",
         "",
         "<b>📅 История:</b>",
     ]
     for d, ddata in by_date.items():
         sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
-        lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
+        lbl = f" <i>({html.escape(str(ddata['day']))})</i>" if ddata["day"] else ""
         lines.append(f"<code>{d}</code>{lbl}\n   └ {sets_str}")
     text = "\n".join(lines)
     if len(text) > 3400:
@@ -656,7 +738,7 @@ async def merge_choose_from(call: CallbackQuery, state: FSMContext):
     await state.update_data(merge_others=others)
     await call.message.edit_text(
         f"🔗 <b>Объединение</b>\n\n"
-        f"Переносим: <b>{from_name}</b>\n\n"
+        f"Переносим: <b>{html.escape(from_name)}</b>\n\n"
         f"<b>Шаг 2.</b> В какое упражнение перенести?\n\n"
         f"<i>Выбери итоговое (в него пойдут все записи):</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
@@ -686,8 +768,8 @@ async def merge_choose_to(call: CallbackQuery, state: FSMContext):
 
     await call.message.edit_text(
         f"✅ <b>Объединено</b>\n\n"
-        f"Из: <b>{from_name}</b> ({before_from} записей)\n"
-        f"В: <b>{to_name}</b>\n\n"
+        f"Из: <b>{html.escape(from_name)}</b> ({before_from} записей)\n"
+        f"В: <b>{html.escape(to_name)}</b>\n\n"
         f"Было у цели: {before_to}\n"
         f"Стало у цели: {after_to}\n"
         f"Перенесено: {moved}",
@@ -726,7 +808,7 @@ async def add_record_start(call: CallbackQuery, state: FSMContext):
     ])
     await call.message.edit_text(
         f"➕ <b>Добавить запись</b>\n\n"
-        f"🎯 <b>{name}</b>\n\n"
+        f"🎯 <b>{html.escape(name)}</b>\n\n"
         f"<b>Шаг 1.</b> За какую дату?\n\n"
         f"Нажми кнопку или введи вручную:\n"
         f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
@@ -745,7 +827,7 @@ async def add_rec_today(call: CallbackQuery, state: FSMContext):
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await call.message.edit_text(
-        f"➕ <b>{name}</b>\n"
+        f"➕ <b>{html.escape(name)}</b>\n"
         f"📅 {iso}\n\n"
         f"<b>Шаг 2.</b> Введи вес и повторы:\n"
         f"<code>80 8</code>",
@@ -765,7 +847,7 @@ async def add_rec_yesterday(call: CallbackQuery, state: FSMContext):
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await call.message.edit_text(
-        f"➕ <b>{name}</b>\n"
+        f"➕ <b>{html.escape(name)}</b>\n"
         f"📅 {iso}\n\n"
         f"<b>Шаг 2.</b> Введи вес и повторы:\n"
         f"<code>80 8</code>",
@@ -775,6 +857,8 @@ async def add_rec_yesterday(call: CallbackQuery, state: FSMContext):
 
 @dp.message(AddRecord.entering_date)
 async def add_record_date(msg: Message, state: FSMContext):
+    if not msg.text:
+        return
     iso = _parse_date(msg.text)
     if not iso:
         await msg.answer(
@@ -784,11 +868,11 @@ async def add_record_date(msg: Message, state: FSMContext):
         )
         return
     data = await state.get_data()
-    name = data.get("add_name")
+    name = data.get("add_name") or ""
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
     await msg.answer(
-        f"➕ <b>{name}</b>\n"
+        f"➕ <b>{html.escape(name)}</b>\n"
         f"📅 {iso}\n\n"
         f"<b>Шаг 2.</b> Введи вес и повторы:\n"
         f"<code>80 8</code>",
@@ -798,6 +882,8 @@ async def add_record_date(msg: Message, state: FSMContext):
 
 @dp.message(AddRecord.entering_value)
 async def add_record_apply(msg: Message, state: FSMContext):
+    if not msg.from_user or not msg.text:
+        return
     try:
         parts = msg.text.replace(",", ".").split()
         weight = float(parts[0])
@@ -820,7 +906,7 @@ async def add_record_apply(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer(
         f"✅ <b>Добавлено</b>\n\n"
-        f"🎯 {name}\n"
+        f"🎯 {html.escape(name)}\n"
         f"📅 {iso}\n"
         f"🏋️ {weight} кг × {reps}",
         parse_mode="HTML",
@@ -861,7 +947,7 @@ async def edit_list(call: CallbackQuery):
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"rec_{set_id}_{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex_{idx}")])
     await call.message.edit_text(
-        f"✏️ <b>{name}</b>\n\n"
+        f"✏️ <b>{html.escape(name)}</b>\n\n"
         f"Выбери запись для изменения\n"
         f"<i>(показаны последние {len(display)} из {len(rows)})</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -897,7 +983,7 @@ async def show_record_actions(call: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"editlist_{ex_idx}")],
     ])
     await call.message.edit_text(
-        f"📝 <b>{name}</b>\n\n"
+        f"📝 <b>{html.escape(name)}</b>\n\n"
         f"┌─────────────────────\n"
         f"│ 📅 {d[:10]}\n"
         f"│ 🏋️ {w} кг × {r} повторов\n"
@@ -919,7 +1005,7 @@ async def edit_record(call: CallbackQuery, state: FSMContext):
     await state.set_state(EditFlow.entering_new)
     await call.message.edit_text(
         f"✏️ <b>Изменение веса/повторов</b>\n\n"
-        f"🎯 <b>{name}</b>\n\n"
+        f"🎯 <b>{html.escape(name)}</b>\n\n"
         f"Введи новые значения: <code>85 8</code>",
         parse_mode="HTML",
     )
@@ -927,6 +1013,8 @@ async def edit_record(call: CallbackQuery, state: FSMContext):
 
 @dp.message(EditFlow.entering_new)
 async def apply_edit(msg: Message, state: FSMContext):
+    if not msg.from_user or not msg.text:
+        return
     try:
         parts = msg.text.replace(",", ".").split()
         weight = float(parts[0])
@@ -963,7 +1051,7 @@ async def edit_date(call: CallbackQuery, state: FSMContext):
     ])
     await call.message.edit_text(
         f"📅 <b>Изменить дату</b>\n\n"
-        f"🎯 <b>{name}</b>\n\n"
+        f"🎯 <b>{html.escape(name)}</b>\n\n"
         f"Выбери или введи вручную:\n"
         f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
         reply_markup=kb, parse_mode="HTML",
@@ -993,6 +1081,8 @@ async def set_date_quick(call: CallbackQuery, state: FSMContext):
 
 @dp.message(EditFlow.entering_date)
 async def apply_date(msg: Message, state: FSMContext):
+    if not msg.from_user or not msg.text:
+        return
     iso = _parse_date(msg.text)
     if not iso:
         await msg.answer(
@@ -1035,7 +1125,7 @@ async def move_record(call: CallbackQuery, state: FSMContext):
                                        callback_data=f"rec_{set_id}_{ex_idx}")])
     await call.message.edit_text(
         f"🔀 <b>Перенести запись</b>\n\n"
-        f"Из: <b>{current}</b>\n\n"
+        f"Из: <b>{html.escape(current)}</b>\n\n"
         f"Куда перенести?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
     )
@@ -1056,8 +1146,8 @@ async def apply_move(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(
         f"✅ <b>Перенесено</b>\n\n"
-        f"Из: {from_name}\n"
-        f"В: <b>{target_name}</b>",
+        f"Из: {html.escape(str(from_name))}\n"
+        f"В: <b>{html.escape(target_name)}</b>",
         parse_mode="HTML",
     )
     names = _all_exercises(call.from_user.id)
@@ -1091,7 +1181,7 @@ async def delete_record(call: CallbackQuery):
             [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
         ])
         await call.message.edit_text(
-            f"📈 <b>{name}</b>\n\nВсе записи удалены.",
+            f"📈 <b>{html.escape(name)}</b>\n\nВсе записи удалены.",
             reply_markup=kb, parse_mode="HTML",
         )
         return
