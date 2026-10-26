@@ -28,16 +28,21 @@ dp = Dispatcher()
 
 
 # ═══════════════════════════════════════════
-# ОСОБЫЕ ПОЛЬЗОВАТЕЛИ
+# ОСОБЫЕ ПОЛЬЗОВАТЕЛИ И СКРЫТЫЕ ПРОГРАММЫ
 # ═══════════════════════════════════════════
 
-OWNER_USERNAMES = ["papirosovv", "lactucoideae"]
-HIDDEN_PROGRAMS = ["papirosov"]
+USER_HIDDEN_PROGRAMS = {
+    "papirosov": ["papirosovv", "lactucoideae"],
+    "veronika": ["veronikaszb"],
+}
 
 
-def is_owner(user):
+def can_access_program(prog_key, user):
+    if prog_key not in USER_HIDDEN_PROGRAMS:
+        return True
     username = (user.username or "").lower()
-    return username in [u.lower() for u in OWNER_USERNAMES]
+    allowed = [u.lower() for u in USER_HIDDEN_PROGRAMS[prog_key]]
+    return username in allowed
 
 
 def visible_programs_for_level(level_key, user):
@@ -45,19 +50,18 @@ def visible_programs_for_level(level_key, user):
     for k, v in PROGRAMS.items():
         if v.get("level") != level_key:
             continue
-        if k in HIDDEN_PROGRAMS and not is_owner(user):
+        if not can_access_program(k, user):
             continue
         out[k] = v
     return out
 
 
-def has_hidden_program(user):
-    if not is_owner(user):
-        return False
-    for k in HIDDEN_PROGRAMS:
-        if k in PROGRAMS:
-            return True
-    return False
+def get_user_hidden_programs(user):
+    res = []
+    for prog_key in USER_HIDDEN_PROGRAMS:
+        if prog_key in PROGRAMS and can_access_program(prog_key, user):
+            res.append(prog_key)
+    return res
 
 
 # ═══════════════════════════════════════════
@@ -123,10 +127,11 @@ def levels_kb(user):
             text=info["title"],
             callback_data=f"level_{key}",
         )])
-    if has_hidden_program(user):
+    for prog_key in get_user_hidden_programs(user):
+        btn_text = "🔥 HIT (для тебя)" if prog_key == "papirosov" else PROGRAMS[prog_key]["title"]
         buttons.append([InlineKeyboardButton(
-            text="🔥 HIT (для тебя)",
-            callback_data="prog_papirosov",
+            text=btn_text,
+            callback_data=f"prog_{prog_key}",
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -178,9 +183,8 @@ def _format_last_hint(last):
     if not last:
         return "🕐 <i>Первый раз — начни с комфортного веса</i>"
     parts = []
-    for w, r, _ in last[:6]:
-        w_str = f"{w:g}" if isinstance(w, (int, float)) else str(w)
-        parts.append(f"<code>{w_str}×{r}</code>")
+    for w, r, _ in last[:3]:
+        parts.append(f"<code>{w}×{r}</code>")
     return "📌 Прошлый раз: " + " · ".join(parts)
 
 
@@ -194,7 +198,7 @@ async def start(msg: Message, state: FSMContext):
     name = msg.from_user.first_name or "друг"
     saved = get_user_program(msg.from_user.id)
 
-    if saved and saved in PROGRAMS:
+    if saved and saved in PROGRAMS and can_access_program(saved, msg.from_user):
         p = PROGRAMS[saved]
         streak = get_streak(msg.from_user.id)
         header = f"💪 <b>Привет, {name}!</b>\n\n"
@@ -418,7 +422,7 @@ async def choose_program(call: CallbackQuery, state: FSMContext):
     if key not in PROGRAMS:
         await call.answer("Программа не найдена")
         return
-    if key in HIDDEN_PROGRAMS and not is_owner(call.from_user):
+    if not can_access_program(key, call.from_user):
         await call.answer("⛔ Программа недоступна", show_alert=True)
         return
     set_user_program(call.from_user.id, key)
@@ -452,9 +456,10 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         "",
     ]
     for i, ex in enumerate(day["exercises"], 1):
+        hint_line = f"\n    💡 <i>{ex['hint']}</i>" if ex.get("hint") else ""
         lines.append(
             f"<b>{i}.</b> {ex['name']}\n"
-            f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}"
+            f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}{hint_line}"
         )
     lines.append("")
     lines.append(f"⚡ <i>Всего упражнений: {len(day['exercises'])}</i>")
@@ -474,7 +479,7 @@ async def start_workout(call: CallbackQuery, state: FSMContext):
         return
     p = PROGRAMS[saved]
     day = p["days"][day_idx]
-    await state.update_data(program=saved, day=day_idx, ex=0, st=0, done_sets=0)
+    await state.update_data(program=saved, day=day_idx, ex=0, st=0)
     await call.message.edit_text(
         f"┌─────────────────────\n"
         f"│ 🏋️ <b>{day['name']}</b>\n"
@@ -499,25 +504,7 @@ async def send_current(message, state):
     progress = f"{st + 1}/{ex['sets']}"
     total_ex = len(day["exercises"])
     ex_num = data["ex"] + 1
-
-    if st == 0:
-        ex_btn = InlineKeyboardButton(
-            text="⏭ Пропустить упражнение",
-            callback_data="wk_skip_ex",
-        )
-    else:
-        ex_btn = InlineKeyboardButton(
-            text="⏭ Закончить упражнение раньше",
-            callback_data="wk_finish_ex",
-        )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [ex_btn],
-        [InlineKeyboardButton(text="🏁 Завершить тренировку досрочно", callback_data="wk_finish_all")],
-    ])
-
-    rm_hint = _live_workout_1rm_hint(message.chat.id, ex_name, st, ex["sets"], str(ex["reps"]))
-
+    hint_block = f"💡 <i>{ex['hint']}</i>\n" if ex.get("hint") else ""
     text = (
         f"┌─────────────────────\n"
         f"│ 🎯 <b>{ex_name}</b>\n"
@@ -525,96 +512,12 @@ async def send_current(message, state):
         f"└─────────────────────\n\n"
         f"🔹 <b>Подход {progress}</b>\n"
         f"🎯 {ex['reps']} повторов • RIR {ex['rir']}\n"
-        f"{_format_last_hint(last)}"
-        f"{rm_hint}\n\n"
+        f"{hint_block}"
+        f"{_format_last_hint(last)}\n\n"
         f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
         f"<code>80 8</code>"
     )
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
-
-
-async def _finish_workout(message: Message, user_id: int, state: FSMContext, early: bool = False):
-    data = await state.get_data()
-    prog_key = data["program"]
-    p = PROGRAMS[prog_key]
-    day = p["days"][data["day"]]
-    done_sets = data.get("done_sets", 0)
-    await state.clear()
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
-        [InlineKeyboardButton(text="🔁 К дням", callback_data=f"prog_{prog_key}")],
-    ])
-
-    if done_sets == 0:
-        await message.answer(
-            "⏹ <b>Тренировка отменена</b>\n\n"
-            "<i>Ни одного подхода не было записано.</i>",
-            reply_markup=kb,
-            parse_mode="HTML",
-        )
-        return
-
-    streak = update_streak(user_id)
-    tonnage = get_total_tonnage(user_id, day["name"])
-    header_title = "🏁 ТРЕНИРОВКА ЗАВЕРШЕНА" if early else "🎉 ТРЕНИРОВКА ГОТОВА"
-
-    await message.answer(
-        f"╔═══════════════════════╗\n"
-        f"║  {header_title}  ║\n"
-        f"╚═══════════════════════╝\n\n"
-        f"✅ Подходов: <b>{done_sets}</b>\n"
-        f"🔥 Стрик: <b>{streak}</b>\n"
-        f"🏋️ Тоннаж: <b>{tonnage:,.0f} кг</b>\n\n"
-        f"<i>Отличная работа! Восстанавливайся и возвращайся 💪</i>",
-        reply_markup=kb,
-        parse_mode="HTML",
-    )
-
-
-@dp.callback_query(Workout.entering_set, F.data.in_({"wk_skip_ex", "wk_finish_ex"}))
-async def skip_or_finish_exercise(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    p = PROGRAMS[data["program"]]
-    day = p["days"][data["day"]]
-    cur_ex = day["exercises"][data["ex"]]
-
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-
-    action_label = "⏭ Пропущено" if call.data == "wk_skip_ex" else "✅ Завершено досрочно"
-    ex_i = data["ex"] + 1
-
-    if ex_i >= len(day["exercises"]):
-        await call.message.answer(
-            f"{action_label}: <b>{cur_ex['name']}</b>",
-            parse_mode="HTML",
-        )
-        await _finish_workout(call.message, call.from_user.id, state, early=False)
-        await call.answer()
-        return
-
-    await state.update_data(ex=ex_i, st=0)
-    next_ex = day["exercises"][ex_i]
-    await call.message.answer(
-        f"{action_label}: <b>{cur_ex['name']}</b>\n\n"
-        f"➡️ Следующее: <b>{next_ex['name']}</b>",
-        parse_mode="HTML",
-    )
-    await send_current(call.message, state)
-    await call.answer()
-
-
-@dp.callback_query(Workout.entering_set, F.data == "wk_finish_all")
-async def finish_workout_early(call: CallbackQuery, state: FSMContext):
-    try:
-        await call.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await _finish_workout(call.message, call.from_user.id, state, early=True)
-    await call.answer()
+    await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(Workout.entering_set)
@@ -640,198 +543,48 @@ async def log_set(msg: Message, state: FSMContext):
     key = f"{day['name']}|{ex_name_safe}"
     save_set(msg.from_user.id, data["program"], day["name"], key, data["st"] + 1, weight, reps)
 
-    done_sets = data.get("done_sets", 0) + 1
     st = data["st"] + 1
-    await state.update_data(done_sets=done_sets)
-
     if st >= ex["sets"]:
         ex_i = data["ex"] + 1
+        st = 0
         if ex_i >= len(day["exercises"]):
-            await msg.answer(f"✅ <b>{weight:g} кг × {reps}</b>", parse_mode="HTML")
-            await _finish_workout(msg, msg.from_user.id, state, early=False)
+            prog_key = data["program"]
+            streak = update_streak(msg.from_user.id)
+            tonnage = get_total_tonnage(msg.from_user.id, day["name"])
+            await state.clear()
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
+                [InlineKeyboardButton(text="🔁 К дням", callback_data=f"prog_{prog_key}")],
+            ])
+            await msg.answer(
+                f"╔═══════════════════════╗\n"
+                f"║   🎉 ТРЕНИРОВКА ГОТОВА   ║\n"
+                f"╚═══════════════════════╝\n\n"
+                f"✅ Подходов: <b>{sum(e['sets'] for e in day['exercises'])}</b>\n"
+                f"🔥 Стрик: <b>{streak}</b>\n"
+                f"🏋️ Тоннаж: <b>{tonnage:,.0f} кг</b>\n\n"
+                f"<i>Отличная работа! Восстанавливайся и возвращайся 💪</i>",
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
             return
         await state.update_data(ex=ex_i, st=0)
         next_ex = day["exercises"][ex_i]
         await msg.answer(
-            f"✅ <b>{weight:g} кг × {reps}</b>\n\n"
+            f"✅ <b>{weight} кг × {reps}</b>\n\n"
             f"➡️ Следующее: <b>{next_ex['name']}</b>",
             parse_mode="HTML",
         )
         await send_current(msg, state)
     else:
         await state.update_data(st=st)
-        await msg.answer(f"✅ <b>{weight:g} кг × {reps}</b>", parse_mode="HTML")
+        await msg.answer(f"✅ <b>{weight} кг × {reps}</b>", parse_mode="HTML")
         await send_current(msg, state)
 
 
 # ═══════════════════════════════════════════
 # ПРОГРЕСС
 # ═══════════════════════════════════════════
-
-import math
-
-
-def _round_plate(weight: float, step: float = 2.5) -> float:
-    """Округляет вес до ближайшего реального шага блинов в зале (2.5 кг или 1.25 кг для малых весов)."""
-    if weight <= 0:
-        return 0.0
-    actual_step = 1.25 if weight < 25 else step
-    return round(weight / actual_step) * actual_step
-
-
-def _calc_1rm_suite(weight: float, reps: int) -> dict:
-    """
-    Вычисляет 1ПМ по 7 передовым научным формулам и считает
-    адаптивный ансамблевый 1ПМ (meta) в зависимости от диапазона повторов.
-    """
-    if weight <= 0 or reps <= 0:
-        return {}
-    if reps == 1:
-        w = round(float(weight), 1)
-        return {
-            "meta": w, "wathen": w, "mayhew": w, "brzycki": w,
-            "epley": w, "lombardi": w, "oconner": w, "lander": w,
-            "min": w, "max": w,
-        }
-
-    r = min(int(reps), 20)
-    w = float(weight)
-
-    epley = w * (1.0 + r / 30.0)
-    brzycki = w * (36.0 / (37.0 - min(r, 30)))
-    wathen = (100.0 * w) / (48.8 + 53.8 * math.exp(-0.075 * r))
-    mayhew = (100.0 * w) / (52.2 + 41.9 * math.exp(-0.055 * r))
-    lombardi = w * (r ** 0.10)
-    oconner = w * (1.0 + 0.025 * r)
-    lander = (100.0 * w) / (101.3 - 2.67123 * min(r, 30))
-
-    if r <= 5:
-        meta = 0.35 * brzycki + 0.35 * wathen + 0.20 * epley + 0.10 * oconner
-    elif r <= 10:
-        meta = 0.35 * wathen + 0.30 * mayhew + 0.25 * epley + 0.10 * brzycki
-    else:
-        meta = 0.40 * mayhew + 0.30 * lombardi + 0.30 * oconner
-
-    all_vals = [epley, brzycki, wathen, mayhew, lombardi, oconner, lander]
-    return {
-        "meta": round(meta, 1),
-        "wathen": round(wathen, 1),
-        "mayhew": round(mayhew, 1),
-        "brzycki": round(brzycki, 1),
-        "epley": round(epley, 1),
-        "lombardi": round(lombardi, 1),
-        "oconner": round(oconner, 1),
-        "lander": round(lander, 1),
-        "min": round(min(all_vals), 1),
-        "max": round(max(all_vals), 1),
-    }
-
-
-def _analyze_exercise_1rm(rows):
-    """Анализирует историю упражнения: находит лучший 1ПМ, динамику и проверяет плато."""
-    if not rows:
-        return None
-
-    best_meta = 0.0
-    best_set = None
-    daily_best = OrderedDict()
-
-    # Сначала ищем по подходам до 15 повторов (наиболее точные для 1ПМ),
-    # если таких нет — берём любые подходы
-    valid_rows = [r for r in rows if isinstance(r[2], (int, float)) and r[2] > 0 and isinstance(r[3], int) and r[3] > 0]
-    if not valid_rows:
-        return None
-
-    strength_rows = [r for r in valid_rows if r[3] <= 15] or valid_rows
-
-    for row in strength_rows:
-        set_id, d, w, r, sn, ex, day_name = row[:7]
-        suite = _calc_1rm_suite(w, r)
-        if not suite:
-            continue
-        meta = suite["meta"]
-        dkey = (d or "")[:10]
-        if dkey not in daily_best or meta > daily_best[dkey]:
-            daily_best[dkey] = meta
-        if meta > best_meta:
-            best_meta = meta
-            best_set = (w, r, dkey, suite)
-
-    if not best_set:
-        return None
-
-    dates_list = list(daily_best.keys())
-    first_1rm = daily_best[dates_list[0]]
-    current_1rm = daily_best[dates_list[-1]]
-    gain = round(best_meta - first_1rm, 1)
-
-    # Проверка плато: последние 3 тренировки без прогресса 1ПМ
-    plateau = False
-    if len(dates_list) >= 3:
-        last_three = [daily_best[k] for k in dates_list[-3:]]
-        if max(last_three) - min(last_three) < 0.5 and last_three[-1] <= last_three[0]:
-            plateau = True
-
-    return {
-        "best_1rm": best_meta,
-        "best_w": best_set[0],
-        "best_r": best_set[1],
-        "best_date": best_set[2],
-        "suite": best_set[3],
-        "gain": gain,
-        "current_1rm": current_1rm,
-        "plateau": plateau,
-    }
-
-
-def _live_workout_1rm_hint(user_id: int, ex_name: str, st_idx: int, total_sets: int, reps_str: str) -> str:
-    """Формирует живую подсказку по 1ПМ и рекомендуемому весу пирамиды прямо во время тренировки."""
-    short = ex_name.split("(")[0].strip()
-    rows = get_exercise_history(user_id, ex_name) or get_exercise_history(user_id, short)
-    stats = _analyze_exercise_1rm(rows)
-    if not stats or stats["best_1rm"] <= 0:
-        return ""
-
-    one_rm = stats["best_1rm"]
-    tm = one_rm * 0.90  # Тренировочный максимум (90% от 1ПМ)
-
-    rec_line = ""
-    # 1. Схема nSuns T1 (9 подходов)
-    if total_sets == 9 and "5/3/1" in reps_str:
-        nsuns_t1 = [
-            (0.75, "5"), (0.85, "3"), (0.95, "1+ 🔥 AMRAP"),
-            (0.90, "3"), (0.85, "3"), (0.80, "3"),
-            (0.75, "5"), (0.70, "5"), (0.65, "5+ 🔥 AMRAP"),
-        ]
-        pct, target_r = nsuns_t1[min(st_idx, 8)]
-        w_rec = _round_plate(tm * pct)
-        rec_line = f"👑 <b>Пирамида nSuns (Сет {st_idx + 1}):</b> ставь <code>{w_rec:g} кг × {target_r}</code>"
-    # 2. Схема nSuns T2 (8 подходов)
-    elif total_sets == 8 and "5/3/1" in reps_str:
-        nsuns_t2 = [
-            (0.50, "6"), (0.60, "5"), (0.70, "3"), (0.70, "5"),
-            (0.70, "7"), (0.70, "4"), (0.70, "6"), (0.70, "8"),
-        ]
-        pct, target_r = nsuns_t2[min(st_idx, 7)]
-        w_rec = _round_plate(tm * pct)
-        rec_line = f"👑 <b>Пирамида nSuns T2 (Сет {st_idx + 1}):</b> ставь <code>{w_rec:g} кг × {target_r}</code>"
-    # 3. Схема Wendler 5/3/1 (3 подхода)
-    elif "5/3/1" in reps_str:
-        wendler_sets = [(0.75, "5"), (0.85, "3"), (0.95, "1+ 🔥")]
-        pct, target_r = wendler_sets[min(st_idx, 2)]
-        w_rec = _round_plate(tm * pct)
-        rec_line = f"⚡ <b>Пирамида 5/3/1 (Сет {st_idx + 1}):</b> ставь <code>{w_rec:g} кг × {target_r}</code>"
-    # 4. Схема GZCLP T1 (5 подходов по 3+)
-    elif "3+" in reps_str:
-        w_rec = _round_plate(one_rm * 0.875)
-        lbl = "3+ 🔥 AMRAP" if st_idx == total_sets - 1 else "3"
-        rec_line = f"🏋️ <b>GZCLP T1:</b> рабочий вес <code>{w_rec:g} кг × {lbl}</code>"
-
-    base_line = f"\n🧬 Твой 1ПМ: <b>{one_rm:g} кг</b>"
-    if rec_line:
-        return f"{base_line}\n{rec_line}"
-    return base_line
-
 
 @dp.callback_query(F.data == "progress")
 async def progress_cb(call: CallbackQuery):
@@ -850,7 +603,7 @@ async def progress_cb(call: CallbackQuery):
     rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="change_prog")])
     await call.message.edit_text(
         f"📊 <b>Твой прогресс</b>\n\n"
-        f"Выбери упражнение для просмотра истории и расчёта 1ПМ\n"
+        f"Выбери упражнение для просмотра истории\n"
         f"<i>(всего: {len(names)})</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         parse_mode="HTML",
@@ -904,230 +657,30 @@ def _render_history(name, rows, idx):
     weights = [r[2] for r in rows if isinstance(r[2], (int, float))]
     max_w = max(weights) if weights else 0
     last = rows[-1]
-    rm_stats = _analyze_exercise_1rm(rows)
-
     lines = [
         f"📈 <b>{name}</b>",
         "",
-        f"┌─────────────────────────",
-    ]
-    if rm_stats:
-        gain_val = rm_stats["gain"]
-        gain_str = f" (+{gain_val:g} кг 🚀)" if gain_val > 0 else ""
-        lines.append(f"│ 🧬 Расчётный 1ПМ: <b>{rm_stats['best_1rm']:g} кг</b>{gain_str}")
-        lines.append(f"│ 🔥 Лучший сет: <b>{rm_stats['best_w']:g} кг × {rm_stats['best_r']}</b>")
-    lines.extend([
-        f"│ 🏆 Макс. вес: <b>{max_w:g} кг</b>",
-        f"│ ⏱ Последний: <b>{last[2]:g} кг × {last[3]}</b>",
+        f"┌─────────────────────",
+        f"│ 🏆 Рекорд: <b>{max_w} кг</b>",
+        f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>",
         f"│ 🗓 Тренировок: <b>{len(by_date)}</b>",
-        f"└─────────────────────────",
-    ])
-
-    if rm_stats and rm_stats["plateau"]:
-        lines.append("")
-        lines.append("⚠️ <b>Детектор плато:</b> 1ПМ не растёт 3 тренировки подряд. Открой <b>Пирамиды 1ПМ</b> ниже, чтобы пробить застой!")
-
-    lines.append("")
-    lines.append("<b>📅 История:</b>")
+        f"└─────────────────────",
+        "",
+        "<b>📅 История:</b>",
+    ]
     for d, ddata in by_date.items():
-        sets_str = " · ".join(f"{w:g}×{r}" for _, w, r in ddata["sets"])
+        sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
         lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
         lines.append(f"<code>{d}</code>{lbl}\n   └ {sets_str}")
     text = "\n".join(lines)
     if len(text) > 3400:
         text = text[:3300] + "\n...<i>(обрезано)</i>"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧬 1ПМ Лаборатория и Пирамиды", callback_data=f"rm_lab_{idx}")],
-        [
-            InlineKeyboardButton(text="➕ Добавить", callback_data=f"addrec_{idx}"),
-            InlineKeyboardButton(text="✏️ Изменить", callback_data=f"editlist_{idx}"),
-        ],
+        [InlineKeyboardButton(text="➕ Добавить запись", callback_data=f"addrec_{idx}")],
+        [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"editlist_{idx}")],
         [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
     ])
     return text, kb
-
-
-# ═══════════════════════════════════════════
-# 1ПМ ЛАБОРАТОРИЯ И ПИРАМИДЫ ПАУЭРЛИФТИНГА
-# ═══════════════════════════════════════════
-
-@dp.callback_query(F.data.startswith("rm_lab_"))
-async def show_1rm_lab(call: CallbackQuery):
-    idx = int(call.data.split("_", 2)[2])
-    names = _all_exercises(call.from_user.id)
-    if idx >= len(names):
-        await call.answer("Упражнение не найдено", show_alert=True)
-        return
-    name = names[idx]
-    rows = get_exercise_history(call.from_user.id, name)
-    stats = _analyze_exercise_1rm(rows)
-    if not stats:
-        await call.answer("Недостаточно данных для расчёта 1ПМ", show_alert=True)
-        return
-
-    s = stats["suite"]
-    one_rm = stats["best_1rm"]
-    tm = round(one_rm * 0.90, 1)
-
-    zones = [
-        ("95%", 0.95, "1–2 повт", "Пиковая сила / Синглы"),
-        ("90%", 0.90, "3–4 повт", "Тяжёлая база"),
-        ("85%", 0.85, "5–6 повт", "Сила + Мощность"),
-        ("80%", 0.80, "7–8 повт", "Силовая гипертрофия"),
-        ("75%", 0.75, "9–10 повт", "Рабочий объём"),
-        ("70%", 0.70, "12 повт", "Скоростно-силовая"),
-    ]
-    zone_lines = []
-    for lbl, pct, reps_lbl, desc in zones:
-        w_zone = _round_plate(one_rm * pct)
-        zone_lines.append(f"• <b>{lbl}</b> → <code>{w_zone:g} кг</code> ({reps_lbl}) — <i>{desc}</i>")
-
-    text = (
-        f"🧬 <b>Лаборатория 1ПМ: {name}</b>\n\n"
-        f"┌──────────────────────────\n"
-        f"│ 🏆 <b>Консенсус 1ПМ: {one_rm:g} кг</b>\n"
-        f"│ 🎯 Тренировочный макс (90%): <b>{tm:g} кг</b>\n"
-        f"│ 📊 Коридор формул: <b>{s['min']:g}–{s['max']:g} кг</b>\n"
-        f"│ 🔥 Базовый сет: <b>{stats['best_w']:g} кг × {stats['best_r']}</b> ({stats['best_date']})\n"
-        f"└──────────────────────────\n\n"
-        f"🔬 <b>Расчёт по 7 научным моделям:</b>\n"
-        f"• Wathen (NSCA): <code>{s['wathen']:g} кг</code>\n"
-        f"• Brzycki (Силовая): <code>{s['brzycki']:g} кг</code>\n"
-        f"• Mayhew (Нелинейная): <code>{s['mayhew']:g} кг</code>\n"
-        f"• Epley (Классика): <code>{s['epley']:g} кг</code>\n"
-        f"• Lander: <code>{s['lander']:g} кг</code> · Lombardi: <code>{s['lombardi']:g} кг</code>\n"
-        f"• O'Conner (Консерват.): <code>{s['oconner']:g} кг</code>\n\n"
-        f"🏋️ <b>Твои рабочие зоны (шаг 2.5 кг):</b>\n"
-        + "\n".join(zone_lines) + "\n\n"
-        f"📐 <b>Выбери пирамиду ниже</b> — бот рассчитает точные веса на каждый подход для пробития 1ПМ:"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔺 Классическая", callback_data=f"rm_pyr_classic_{idx}"),
-            InlineKeyboardButton(text="🔻 Обратная (RPT)", callback_data=f"rm_pyr_reverse_{idx}"),
-        ],
-        [
-            InlineKeyboardButton(text="👑 Пирамида nSuns (9 сетов)", callback_data=f"rm_pyr_nsuns_{idx}"),
-        ],
-        [
-            InlineKeyboardButton(text="⚡ 5/3/1 + Джокеры", callback_data=f"rm_pyr_wendler_{idx}"),
-            InlineKeyboardButton(text="🎯 Выход на пик", callback_data=f"rm_pyr_peaking_{idx}"),
-        ],
-        [InlineKeyboardButton(text="⬅️ Назад к истории", callback_data=f"ex_{idx}")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-
-@dp.callback_query(F.data.startswith("rm_pyr_"))
-async def show_pyramid_plan(call: CallbackQuery):
-    parts = call.data.split("_")
-    mode = parts[2]
-    idx = int(parts[3])
-    names = _all_exercises(call.from_user.id)
-    if idx >= len(names):
-        await call.answer("Ошибка", show_alert=True)
-        return
-    name = names[idx]
-    rows = get_exercise_history(call.from_user.id, name)
-    stats = _analyze_exercise_1rm(rows)
-    if not stats:
-        await call.answer("Нет данных 1ПМ", show_alert=True)
-        return
-
-    one_rm = stats["best_1rm"]
-    tm = one_rm * 0.90
-    p = lambda pct: f"{_round_plate(one_rm * pct):g}"
-    ptm = lambda pct: f"{_round_plate(tm * pct):g}"
-
-    if mode == "classic":
-        title = "🔺 Классическая пирамида (Пробитие 1ПМ)"
-        desc = (
-            "Плавное повышение веса и снижение повторов. Идеальна для подготовки ЦНС "
-            "к субмаксимальным весам и выходу на новый рекорд.\n\n"
-            f"<b>План подходов (от 1ПМ {one_rm:g} кг):</b>\n"
-            f"1️⃣ Разгон (60%): <code>{p(0.60)} кг × 8</code> <i>(отдых 90 сек)</i>\n"
-            f"2️⃣ Входной (72.5%): <code>{p(0.725)} кг × 5</code> <i>(отдых 2 мин)</i>\n"
-            f"3️⃣ Рабочий (82.5%): <code>{p(0.825)} кг × 3</code> <i>(отдых 3 мин)</i>\n"
-            f"4️⃣ Тяжёлый (90%): <code>{p(0.90)} кг × 2</code> <i>(отдых 3–4 мин)</i>\n"
-            f"5️⃣ Пиковый (95%): <code>{p(0.95)} кг × 1</code> <i>(отдых 4 мин)</i>\n"
-            f"6️⃣ 🏆 <b>Штурм рекорда (102.5%):</b> <code>{p(1.025)} кг × 1</code> <i>(только если 5-й сет пошёл легко!)</i>"
-        )
-    elif mode == "reverse":
-        title = "🔻 Обратная пирамида (RPT)"
-        desc = (
-            "Самый тяжёлый подход выполняется <b>первым</b> после разминки, пока ЦНС и мышцы "
-            "на 100% свежие. Даёт мощнейший стимул для роста 1ПМ без перетренированности.\n\n"
-            f"<b>Разминка:</b> <code>{p(0.50)}×6</code> → <code>{p(0.70)}×3</code> → <code>{p(0.825)}×1</code>\n\n"
-            f"<b>Рабочая обратная пирамида:</b>\n"
-            f"1️⃣ 🔥 <b>Топ-сет (90%):</b> <code>{p(0.90)} кг × 3–4</code> <i>(RIR 1, отдых 3–4 мин)</i>\n"
-            f"2️⃣ <b>Сет 2 (-10% от топ-сета):</b> <code>{p(0.81)} кг × 6–8</code> <i>(отдых 3 мин)</i>\n"
-            f"3️⃣ <b>Сет 3 (-20% от топ-сета):</b> <code>{p(0.725)} кг × 8–10</code> <i>(работа на объём)</i>"
-        )
-    elif mode == "nsuns":
-        title = "👑 Пирамида nSuns LP (9 подходов)"
-        desc = (
-            f"Легендарная линейная пирамида от Тренировочного Максимума (<b>ТМ = {tm:.1f} кг</b>, 90% от 1ПМ). "
-            "Сочетает выход на пик в 3-м подходе и волновой спуск.\n\n"
-            "<b>Твои 9 рабочих подходов:</b>\n"
-            f"1️⃣ 75% ТМ: <code>{ptm(0.75)} кг × 5</code>\n"
-            f"2️⃣ 85% ТМ: <code>{ptm(0.85)} кг × 3</code>\n"
-            f"3️⃣ 🔥 <b>95% ТМ (AMRAP):</b> <code>{ptm(0.95)} кг × 1+</code> <i>(ключевой подход!)</i>\n"
-            f"4️⃣ 90% ТМ: <code>{ptm(0.90)} кг × 3</code>\n"
-            f"5️⃣ 85% ТМ: <code>{ptm(0.85)} кг × 3</code>\n"
-            f"6️⃣ 80% ТМ: <code>{ptm(0.80)} кг × 3</code>\n"
-            f"7️⃣ 75% ТМ: <code>{ptm(0.75)} кг × 5</code>\n"
-            f"8️⃣ 70% ТМ: <code>{ptm(0.70)} кг × 5</code>\n"
-            f"9️⃣ 🔥 <b>65% ТМ (AMRAP):</b> <code>{ptm(0.65)} кг × 5+</code>\n\n"
-            "📈 <b>Правило повышения веса на следующей неделе:</b>\n"
-            "• Сделал в 3-м сете <b>2–3 повтора</b> → добавь <b>+2.5 кг</b>\n"
-            "• Сделал <b>4–5 повторов</b> → добавь <b>+5 кг</b>"
-        )
-    elif mode == "wendler":
-        title = "⚡ Волновая 5/3/1 + Joker Sets (Уэндлер)"
-        desc = (
-            f"Расчёт построен от твоего Тренировочного Максимума (<b>ТМ = {tm:.1f} кг</b>).\n\n"
-            f"📅 <b>Неделя 1 (5/5/5+):</b>\n"
-            f"   └ <code>{ptm(0.65)}×5</code> · <code>{ptm(0.75)}×5</code> · 🔥 <code>{ptm(0.85)}×5+</code>\n"
-            f"📅 <b>Неделя 2 (3/3/3+):</b>\n"
-            f"   └ <code>{ptm(0.70)}×3</code> · <code>{ptm(0.80)}×3</code> · 🔥 <code>{ptm(0.90)}×3+</code>\n"
-            f"📅 <b>Неделя 3 (5/3/1+):</b>\n"
-            f"   └ <code>{ptm(0.75)}×5</code> · <code>{ptm(0.85)}×3</code> · 🔥 <code>{ptm(0.95)}×1+</code>\n\n"
-            f"🃏 <b>Joker Sets (если последний сет пошёл легко):</b>\n"
-            f"• Джокер 1 (100% ТМ): <code>{ptm(1.00)} кг × 1–2</code>\n"
-            f"• Джокер 2 (105% ТМ): <code>{ptm(1.05)} кг × 1</code>"
-        )
-    else:
-        title = "🎯 Выход на пик (Peaking Singles + Back-Off)"
-        desc = (
-            "Протокол соревновательного пауэрлифтинга: тяжёлые синглы приучают нервную систему "
-            "к предельным весам без закисления, а сброс веса (Back-off) закрепляет технику.\n\n"
-            f"<b>Подводка и синглы (от 1ПМ {one_rm:g} кг):</b>\n"
-            f"1️⃣ Подводящий (85%): <code>{p(0.85)} кг × 2</code>\n"
-            f"2️⃣ Первый сингл (90%): <code>{p(0.90)} кг × 1</code> <i>(RPE 8, уверенно)</i>\n"
-            f"3️⃣ Второй сингл (92.5%): <code>{p(0.925)} кг × 1</code> <i>(RPE 8.5–9)</i>\n"
-            f"4️⃣ 🔥 <b>Пиковый сингл (95%):</b> <code>{p(0.95)} кг × 1</code> <i>(RPE 9.5)</i>\n\n"
-            f"📉 <b>Back-Off подходы (сброс 15%):</b>\n"
-            f"5️⃣ Сет 5 (80%): <code>{p(0.80)} кг × 3</code>\n"
-            f"6️⃣ Сет 6 (80%): <code>{p(0.80)} кг × 3</code>"
-        )
-
-    text = f"📐 <b>{title}</b>\n🎯 Упражнение: <b>{name}</b>\n\n{desc}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔺 Классика", callback_data=f"rm_pyr_classic_{idx}"),
-            InlineKeyboardButton(text="🔻 Обратная", callback_data=f"rm_pyr_reverse_{idx}"),
-        ],
-        [
-            InlineKeyboardButton(text="👑 nSuns (9 сетов)", callback_data=f"rm_pyr_nsuns_{idx}"),
-        ],
-        [
-            InlineKeyboardButton(text="⚡ 5/3/1 + Джокеры", callback_data=f"rm_pyr_wendler_{idx}"),
-            InlineKeyboardButton(text="🎯 Синглы (Пик)", callback_data=f"rm_pyr_peaking_{idx}"),
-        ],
-        [InlineKeyboardButton(text="⬅️ К лаборатории 1ПМ", callback_data=f"rm_lab_{idx}")],
-    ])
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ═══════════════════════════════════════════
