@@ -114,6 +114,16 @@ def _find_day_for_exercise(prog_key, ex_name):
     return ""
 
 
+def _find_exercise_config(prog_key, ex_name):
+    if not prog_key or prog_key not in PROGRAMS:
+        return None
+    for day in PROGRAMS[prog_key]["days"]:
+        for ex in day["exercises"]:
+            if ex.get("name") == ex_name:
+                return ex
+    return None
+
+
 def _kb_back(cb, text="⬅️ Назад"):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=text, callback_data=cb)]
@@ -186,6 +196,53 @@ def _format_last_hint(last):
     for w, r, _ in last[:3]:
         parts.append(f"<code>{w}×{r}</code>")
     return "📌 Прошлый раз: " + " · ".join(parts)
+
+
+def _format_specific_set_hint(user_id, ex_name, set_idx, short_label):
+    """Ищет в истории именно конкретный подход (1-й = Топ-сет, 2-й = Бэк-офф)."""
+    rows = get_exercise_history(user_id, ex_name)
+    if not rows and ex_name == "Жим в смите 25°":
+        rows = get_exercise_history(user_id, "Жим в смите 25° (3-1-1)")
+
+    if not rows:
+        return f"🕐 <i>Прошлый подход ({short_label}): записей ещё нет — выбери рабочий вес</i>"
+
+    target_sn = set_idx + 1
+    matched = []
+    for row in rows:
+        try:
+            _, d, w, r, sn, _, _ = row[:7]
+            if sn == target_sn:
+                matched.append((d, w, r))
+        except (ValueError, TypeError):
+            continue
+
+    # Если точного совпадения по номеру сета не нашлось (например, старая запись),
+    # группируем по датам и берём подход по счёту за день
+    if not matched:
+        by_date = OrderedDict()
+        for row in rows:
+            try:
+                _, d, w, r, sn, _, _ = row[:7]
+                dkey = (d or "")[:10]
+                by_date.setdefault(dkey, []).append((dkey, w, r))
+            except (ValueError, TypeError):
+                continue
+        for dkey, dsets in by_date.items():
+            if len(dsets) > set_idx:
+                matched.append(dsets[set_idx])
+
+    if not matched:
+        return f"🕐 <i>Прошлый подход ({short_label}): ещё не выполнялся</i>"
+
+    last_d, last_w, last_r = matched[-1]
+    if len(matched) >= 2:
+        prev_w, prev_r = matched[-2][1], matched[-2][2]
+        return (
+            f"📌 Прошлый подход (<b>{short_label}</b>): <code>{last_w} кг × {last_r}</code> "
+            f"<i>(ранее: {prev_w}×{prev_r})</i>"
+        )
+    return f"📌 Прошлый подход (<b>{short_label}</b>): <code>{last_w} кг × {last_r}</code>"
 
 
 # ═══════════════════════════════════════════
@@ -456,11 +513,22 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
         "",
     ]
     for i, ex in enumerate(day["exercises"], 1):
-        hint_line = f"\n    💡 <i>{ex['hint']}</i>" if ex.get("hint") else ""
-        lines.append(
-            f"<b>{i}.</b> {ex['name']}\n"
-            f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}{hint_line}"
-        )
+        if ex.get("set_details"):
+            sub_lines = []
+            details = ex["set_details"]
+            for s_idx, s_info in enumerate(details, 1):
+                branch = "└" if s_idx == len(details) else "├"
+                lbl = s_info.get("short_label", f"Сет {s_idx}")
+                icon = "🔥" if s_idx == 1 else "⚡️"
+                sh = f" • <i>{s_info['short_hint']}</i>" if s_info.get("short_hint") else ""
+                sub_lines.append(f"    {branch} {icon} <b>{lbl}:</b> {s_info['reps']} повт.{sh}")
+            lines.append(f"<b>{i}. {ex['name']}</b>\n" + "\n".join(sub_lines))
+        else:
+            hint_line = f"\n    💡 <i>{ex['hint']}</i>" if ex.get("hint") else ""
+            lines.append(
+                f"<b>{i}.</b> {ex['name']}\n"
+                f"    └ {ex['sets']}×{ex['reps']} • RIR {ex['rir']}{hint_line}"
+            )
     lines.append("")
     lines.append(f"⚡ <i>Всего упражнений: {len(day['exercises'])}</i>")
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -499,24 +567,48 @@ async def send_current(message, state):
     ex = day["exercises"][data["ex"]]
     st = data["st"]
     ex_name = ex["name"]
-    key = f"{day['name']}|{ex_name}"
-    last = get_last(message.chat.id, data["program"], key)
-    progress = f"{st + 1}/{ex['sets']}"
     total_ex = len(day["exercises"])
     ex_num = data["ex"] + 1
-    hint_block = f"💡 <i>{ex['hint']}</i>\n" if ex.get("hint") else ""
-    text = (
-        f"┌─────────────────────\n"
-        f"│ 🎯 <b>{ex_name}</b>\n"
-        f"│ Упражнение {ex_num} из {total_ex}\n"
-        f"└─────────────────────\n\n"
-        f"🔹 <b>Подход {progress}</b>\n"
-        f"🎯 {ex['reps']} повторов • RIR {ex['rir']}\n"
-        f"{hint_block}"
-        f"{_format_last_hint(last)}\n\n"
-        f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
-        f"<code>80 8</code>"
-    )
+
+    set_details = ex.get("set_details")
+    if set_details and st < len(set_details):
+        s_info = set_details[st]
+        set_title = s_info.get("title", f"🔹 Подход {st + 1}/{ex['sets']}")
+        short_label = s_info.get("short_label", f"Сет {st + 1}")
+        reps_str = s_info.get("reps", ex["reps"])
+        instruction = s_info.get("instruction", "")
+        last_line = _format_specific_set_hint(message.chat.id, ex_name, st, short_label)
+
+        instr_block = f"📋 <b>Задача:</b> {instruction}\n\n" if instruction else ""
+        text = (
+            f"┌─────────────────────\n"
+            f"│ 🎯 <b>{ex_name}</b>\n"
+            f"│ Упражнение {ex_num} из {total_ex}\n"
+            f"└─────────────────────\n\n"
+            f"<b>{set_title}</b>\n"
+            f"🎯 Повторы: <b>{reps_str}</b> • RIR {ex['rir']}\n"
+            f"{instr_block}"
+            f"{last_line}\n\n"
+            f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
+            f"<code>80 8</code>"
+        )
+    else:
+        key = f"{day['name']}|{ex_name}"
+        last = get_last(message.chat.id, data["program"], key)
+        progress = f"{st + 1}/{ex['sets']}"
+        hint_block = f"💡 <i>{ex['hint']}</i>\n" if ex.get("hint") else ""
+        text = (
+            f"┌─────────────────────\n"
+            f"│ 🎯 <b>{ex_name}</b>\n"
+            f"│ Упражнение {ex_num} из {total_ex}\n"
+            f"└─────────────────────\n\n"
+            f"🔹 <b>Подход {progress}</b>\n"
+            f"🎯 {ex['reps']} повторов • RIR {ex['rir']}\n"
+            f"{hint_block}"
+            f"{_format_last_hint(last)}\n\n"
+            f"✍️ Введи <b>вес и повторы</b> через пробел:\n"
+            f"<code>80 8</code>"
+        )
     await message.answer(text, parse_mode="HTML")
 
 
@@ -539,11 +631,18 @@ async def log_set(msg: Message, state: FSMContext):
     p = PROGRAMS[data["program"]]
     day = p["days"][data["day"]]
     ex = day["exercises"][data["ex"]]
+    current_st = data["st"]
     ex_name_safe = (ex["name"] or "").strip() or "Без названия"
     key = f"{day['name']}|{ex_name_safe}"
-    save_set(msg.from_user.id, data["program"], day["name"], key, data["st"] + 1, weight, reps)
+    save_set(msg.from_user.id, data["program"], day["name"], key, current_st + 1, weight, reps)
 
-    st = data["st"] + 1
+    set_details = ex.get("set_details")
+    if set_details and current_st < len(set_details):
+        logged_label = set_details[current_st].get("short_label", f"Подход {current_st + 1}")
+    else:
+        logged_label = f"Подход {current_st + 1}"
+
+    st = current_st + 1
     if st >= ex["sets"]:
         ex_i = data["ex"] + 1
         st = 0
@@ -571,14 +670,23 @@ async def log_set(msg: Message, state: FSMContext):
         await state.update_data(ex=ex_i, st=0)
         next_ex = day["exercises"][ex_i]
         await msg.answer(
-            f"✅ <b>{weight} кг × {reps}</b>\n\n"
-            f"➡️ Следующее: <b>{next_ex['name']}</b>",
+            f"✅ <b>{logged_label} записан: {weight} кг × {reps}</b>\n\n"
+            f"➡️ Следующее упражнение: <b>{next_ex['name']}</b>",
             parse_mode="HTML",
         )
         await send_current(msg, state)
     else:
         await state.update_data(st=st)
-        await msg.answer(f"✅ <b>{weight} кг × {reps}</b>", parse_mode="HTML")
+        next_label = (
+            set_details[st].get("short_label", f"Подход {st + 1}")
+            if set_details and st < len(set_details)
+            else f"Подход {st + 1}"
+        )
+        await msg.answer(
+            f"✅ <b>{logged_label} записан: {weight} кг × {reps}</b>\n"
+            f"🔽 Далее — <b>{next_label}</b>:",
+            parse_mode="HTML",
+        )
         await send_current(msg, state)
 
 
@@ -631,11 +739,11 @@ async def show_exercise_history(call: CallbackQuery):
             reply_markup=kb, parse_mode="HTML",
         )
         return
-    text, kb = _render_history(name, rows, idx)
+    text, kb = _render_history(name, rows, idx, user_id=call.from_user.id)
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
-def _render_history(name, rows, idx):
+def _render_history(name, rows, idx, user_id=None):
     by_date = OrderedDict()
     for row in rows:
         try:
@@ -654,24 +762,51 @@ def _render_history(name, rows, idx):
                 [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
             ]),
         )
+
+    prog_key = get_user_program(user_id) if user_id else None
+    ex_cfg = _find_exercise_config(prog_key, name)
+    has_set_details = bool(ex_cfg and ex_cfg.get("set_details"))
+
     weights = [r[2] for r in rows if isinstance(r[2], (int, float))]
     max_w = max(weights) if weights else 0
     last = rows[-1]
+
     lines = [
         f"📈 <b>{name}</b>",
         "",
         f"┌─────────────────────",
         f"│ 🏆 Рекорд: <b>{max_w} кг</b>",
-        f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>",
+    ]
+
+    if has_set_details and len(ex_cfg["set_details"]) >= 2:
+        top_rows = [r for r in rows if r[4] == 1]
+        back_rows = [r for r in rows if r[4] == 2]
+        if top_rows:
+            lines.append(f"│ 🔥 Посл. Топ-сет: <b>{top_rows[-1][2]} кг × {top_rows[-1][3]}</b>")
+        if back_rows:
+            lines.append(f"│ ⚡️ Посл. Бэк-офф: <b>{back_rows[-1][2]} кг × {back_rows[-1][3]}</b>")
+    else:
+        lines.append(f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>")
+
+    lines.extend([
         f"│ 🗓 Тренировок: <b>{len(by_date)}</b>",
         f"└─────────────────────",
         "",
         "<b>📅 История:</b>",
-    ]
+    ])
+
     for d, ddata in by_date.items():
-        sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
+        if has_set_details:
+            formatted_sets = []
+            for i_s, (sn, w, r) in enumerate(ddata["sets"]):
+                tag = "Топ" if (sn == 1 or i_s == 0) else "Бэк"
+                formatted_sets.append(f"{tag}: {w}×{r}")
+            sets_str = " · ".join(formatted_sets)
+        else:
+            sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
         lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
         lines.append(f"<code>{d}</code>{lbl}\n   └ {sets_str}")
+
     text = "\n".join(lines)
     if len(text) > 3400:
         text = text[:3300] + "\n...<i>(обрезано)</i>"
@@ -773,7 +908,7 @@ async def merge_choose_to(call: CallbackQuery, state: FSMContext):
     rows = get_exercise_history(call.from_user.id, to_name)
     if not rows:
         return
-    text, kb = _render_history(to_name, rows, new_idx)
+    text, kb = _render_history(to_name, rows, new_idx, user_id=call.from_user.id)
     await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -905,7 +1040,7 @@ async def add_record_apply(msg: Message, state: FSMContext):
     rows = get_exercise_history(msg.from_user.id, name)
     if not rows:
         return
-    text, kb = _render_history(name, rows, new_idx)
+    text, kb = _render_history(name, rows, new_idx, user_id=msg.from_user.id)
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -1013,7 +1148,7 @@ async def apply_edit(msg: Message, state: FSMContext):
     update_set(msg.from_user.id, set_id, weight, reps)
     await state.clear()
     rows = get_exercise_history(msg.from_user.id, name)
-    text, kb = _render_history(name, rows, ex_idx)
+    text, kb = _render_history(name, rows, ex_idx, user_id=msg.from_user.id)
     await msg.answer(f"✅ <b>Записано:</b> {weight} кг × {reps}", parse_mode="HTML")
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -1058,7 +1193,7 @@ async def set_date_quick(call: CallbackQuery, state: FSMContext):
     names = _all_exercises(call.from_user.id)
     name = names[ex_idx]
     rows = get_exercise_history(call.from_user.id, name)
-    text, kb = _render_history(name, rows, ex_idx)
+    text, kb = _render_history(name, rows, ex_idx, user_id=call.from_user.id)
     await call.message.edit_text(f"✅ Дата изменена на <b>{iso}</b>", parse_mode="HTML")
     await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -1083,7 +1218,7 @@ async def apply_date(msg: Message, state: FSMContext):
     update_set_date(msg.from_user.id, set_id, iso)
     await state.clear()
     rows = get_exercise_history(msg.from_user.id, name)
-    text, kb = _render_history(name, rows, ex_idx)
+    text, kb = _render_history(name, rows, ex_idx, user_id=msg.from_user.id)
     await msg.answer(f"✅ Дата изменена на <b>{iso}</b>", parse_mode="HTML")
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
@@ -1140,7 +1275,7 @@ async def apply_move(call: CallbackQuery, state: FSMContext):
     rows = get_exercise_history(call.from_user.id, target_name)
     if not rows:
         return
-    text, kb = _render_history(target_name, rows, new_idx)
+    text, kb = _render_history(target_name, rows, new_idx, user_id=call.from_user.id)
     await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -1167,7 +1302,7 @@ async def delete_record(call: CallbackQuery):
             reply_markup=kb, parse_mode="HTML",
         )
         return
-    text, kb = _render_history(name, rows, ex_idx)
+    text, kb = _render_history(name, rows, ex_idx, user_id=call.from_user.id)
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 
