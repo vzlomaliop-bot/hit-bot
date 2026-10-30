@@ -1,8 +1,10 @@
 import asyncio
 import os
+import sqlite3
 from collections import OrderedDict
 from datetime import date, datetime
 
+import database
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
@@ -78,6 +80,7 @@ class EditFlow(StatesGroup):
 
 
 class AddRecord(StatesGroup):
+    choosing_set_type = State()
     entering_date = State()
     entering_value = State()
 
@@ -88,20 +91,55 @@ class MergeFlow(StatesGroup):
 
 
 # ═══════════════════════════════════════════
-# ХЕЛПЕРЫ
+# РАБОТА С БАЗОЙ И УПРАЖНЕНИЯМИ
 # ═══════════════════════════════════════════
 
-def _all_exercises(user_id):
-    names = set()
+def _get_db_path():
+    for attr in ("DB_PATH", "DB_NAME", "DB_FILE", "DATABASE"):
+        if hasattr(database, attr):
+            val = getattr(database, attr)
+            if isinstance(val, str) and val:
+                return val
+    data_dir = os.getenv("DATA_DIR")
+    if data_dir:
+        candidate = os.path.join(data_dir, "workouts.db")
+        if os.path.exists(candidate):
+            return candidate
+    return "workouts.db"
+
+
+def _program_exercises_ordered(prog_key):
+    """Возвращает список упражнений текущей программы в порядке дней."""
+    if not prog_key or prog_key not in PROGRAMS:
+        return []
+    result = []
+    for day in PROGRAMS[prog_key]["days"]:
+        for ex in day["exercises"]:
+            name = ex.get("name")
+            if name and name not in result:
+                result.append(name)
+    return result
+
+
+def _unused_exercises(user_id):
+    """Возвращает список упражнений из БД, которых нет в активной программе."""
     prog_key = get_user_program(user_id)
-    if prog_key and prog_key in PROGRAMS:
-        for day in PROGRAMS[prog_key]["days"]:
-            for ex in day["exercises"]:
-                if ex.get("name"):
-                    names.add(ex["name"])
+    active = set(_program_exercises_ordered(prog_key))
+    db_names = set(get_user_exercises(user_id))
+    return sorted(db_names - active)
+
+
+def _all_exercises(user_id):
+    """Сначала упражнения текущей программы по порядку, затем остальные из базы."""
+    prog_key = get_user_program(user_id)
+    ordered = _program_exercises_ordered(prog_key)
+    seen = set(ordered)
+    extras = []
     for n in get_user_exercises(user_id):
-        names.add(n)
-    return sorted(names)
+        if n not in seen:
+            extras.append(n)
+            seen.add(n)
+    return ordered + sorted(extras)
 
 
 def _find_day_for_exercise(prog_key, ex_name):
@@ -122,6 +160,77 @@ def _find_exercise_config(prog_key, ex_name):
             if ex.get("name") == ex_name:
                 return ex
     return None
+
+
+def _update_set_number_in_db(user_id, set_id, new_set_num):
+    """Меняет номер подхода (1 = Топ-сет, 2 = Бэк-офф) в таблице sets."""
+    db_path = _get_db_path()
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(sets)")
+    cols = [info[1] for info in c.fetchall()]
+    set_col = None
+    for candidate in ("set_num", "set_number", "set_idx", "st"):
+        if candidate in cols:
+            set_col = candidate
+            break
+    if set_col:
+        c.execute(
+            f"UPDATE sets SET {set_col}=? WHERE id=? AND user_id=?",
+            (new_set_num, set_id, user_id),
+        )
+        conn.commit()
+    conn.close()
+
+
+def _delete_exercise_records(user_id, ex_name):
+    """Удаляет все записи конкретного упражнения у пользователя."""
+    rows = get_exercise_history(user_id, ex_name)
+    count = 0
+    for r in rows:
+        delete_set(user_id, r[0])
+        count += 1
+    db_path = _get_db_path()
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute(
+            "DELETE FROM sets WHERE user_id=? AND (exercise=? OR exercise LIKE ?)",
+            (user_id, ex_name, f"%|{ex_name}"),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    return count
+
+
+def _delete_all_user_records(user_id):
+    """Полностью очищает историю подходов пользователя."""
+    db_path = _get_db_path()
+    deleted = 0
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM sets WHERE user_id=?", (user_id,))
+        deleted = c.fetchone()[0]
+        c.execute("DELETE FROM sets WHERE user_id=?", (user_id,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        for name in get_user_exercises(user_id):
+            deleted += _delete_exercise_records(user_id, name)
+    return deleted
+
+
+def _set_type_label(sn, idx_in_day=0, has_details=True, total_sets=2):
+    """Возвращает красивую плашку Топ-сет / Бэк-офф."""
+    if not has_details and total_sets > 2:
+        return f"Сет #{sn or (idx_in_day + 1)}"
+    effective = sn if sn in (1, 2) else (1 if idx_in_day == 0 else 2)
+    if effective == 1 or total_sets == 1:
+        return "🔥 Топ-сет"
+    return "⚡️ Бэк-офф"
 
 
 def _kb_back(cb, text="⬅️ Назад"):
@@ -201,9 +310,6 @@ def _format_last_hint(last):
 def _format_specific_set_hint(user_id, ex_name, set_idx, short_label):
     """Ищет в истории именно конкретный подход (1-й = Топ-сет, 2-й = Бэк-офф)."""
     rows = get_exercise_history(user_id, ex_name)
-    if not rows and ex_name == "Жим в смите 25°":
-        rows = get_exercise_history(user_id, "Жим в смите 25° (3-1-1)")
-
     if not rows:
         return f"🕐 <i>Прошлый подход ({short_label}): записей ещё нет — выбери рабочий вес</i>"
 
@@ -217,8 +323,6 @@ def _format_specific_set_hint(user_id, ex_name, set_idx, short_label):
         except (ValueError, TypeError):
             continue
 
-    # Если точного совпадения по номеру сета не нашлось (например, старая запись),
-    # группируем по датам и берём подход по счёту за день
     if not matched:
         by_date = OrderedDict()
         for row in rows:
@@ -281,8 +385,7 @@ async def start(msg: Message, state: FSMContext):
 
 @dp.message(Command("debug", ignore_case=True))
 async def debug_cmd(msg: Message):
-    import sqlite3
-    conn = sqlite3.connect("workouts.db")
+    conn = sqlite3.connect(_get_db_path())
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM sets WHERE user_id=?", (msg.from_user.id,))
     total = c.fetchone()[0]
@@ -299,8 +402,7 @@ async def debug_cmd(msg: Message):
 
 @dp.message(Command("fixnone", ignore_case=True))
 async def fixnone_cmd(msg: Message):
-    import sqlite3
-    conn = sqlite3.connect("workouts.db")
+    conn = sqlite3.connect(_get_db_path())
     c = conn.cursor()
     c.execute("""SELECT id, date, weight, reps, exercise, day_name
                  FROM sets
@@ -326,8 +428,7 @@ async def fixnone_cmd(msg: Message):
 
 @dp.callback_query(F.data == "fixnone_start")
 async def fixnone_start(call: CallbackQuery, state: FSMContext):
-    import sqlite3
-    conn = sqlite3.connect("workouts.db")
+    conn = sqlite3.connect(_get_db_path())
     c = conn.cursor()
     c.execute("""SELECT id, date, weight, reps, exercise, day_name
                  FROM sets
@@ -378,55 +479,55 @@ async def fixnone_apply(call: CallbackQuery, state: FSMContext):
 
 @dp.message(Command("export", ignore_case=True))
 async def export_cmd(msg: Message):
-    import sqlite3
-    
-    conn = sqlite3.connect("workouts.db")
-    c = conn.cursor()
-    c.execute(
-        "SELECT exercise, date, weight, reps FROM sets WHERE user_id=? ORDER BY id ASC", 
-        (msg.from_user.id,)
-    )
-    rows = c.fetchall()
-    conn.close()
-    
-    if not rows:
+    prog_key = get_user_program(msg.from_user.id)
+    names = _all_exercises(msg.from_user.id)
+    if not names:
         await msg.answer("В базе пока нет записей.")
-        return
-
-    data = {}
-    for ex_key, d, w, r in rows:
-        if not ex_key:
-            continue
-        name = str(ex_key).split("|")[-1].strip()
-        if name.lower() in ("none", "null", "nan", "0"):
-            continue
-        
-        if name not in data:
-            data[name] = OrderedDict()
-        
-        dkey = str(d)[:10]
-        if dkey not in data[name]:
-            data[name][dkey] = []
-        data[name][dkey].append(f"{w}×{r}")
-        
-    if not data:
-        await msg.answer("Нет подходящих записей для экспорта.")
         return
 
     messages = []
     current_chunk = "📊 <b>Полная история тренировок</b>\n"
+    has_any = False
 
-    for name, dates in sorted(data.items()):
+    for name in names:
+        rows = get_exercise_history(msg.from_user.id, name)
+        if not rows:
+            continue
+        has_any = True
+        ex_cfg = _find_exercise_config(prog_key, name)
+        has_details = bool(ex_cfg and ex_cfg.get("set_details"))
+        total_sets = ex_cfg["sets"] if ex_cfg else 2
+
+        by_date = OrderedDict()
+        for row in rows:
+            try:
+                _, d, w, r, sn, _, _ = row[:7]
+                dkey = str(d)[:10]
+                by_date.setdefault(dkey, []).append((sn, w, r))
+            except (ValueError, TypeError):
+                continue
+
         block = f"\n🔹 <b>{name}</b>\n"
-        for d, sets in dates.items():
-            sets_str = " · ".join(sets)
+        for d, sets in by_date.items():
+            if has_details or prog_key == "papirosov":
+                parts = []
+                for idx_s, (sn, w, r) in enumerate(sets):
+                    lbl = "Топ" if (sn == 1 or (sn not in (1, 2) and idx_s == 0) or total_sets == 1) else "Бэк"
+                    parts.append(f"{lbl}: {w}×{r}")
+                sets_str = " · ".join(parts)
+            else:
+                sets_str = " · ".join(f"{w}×{r}" for _, w, r in sets)
             block += f"<code>{d}</code>: {sets_str}\n"
-            
+
         if len(current_chunk) + len(block) > 3500:
             messages.append(current_chunk)
             current_chunk = block
         else:
             current_chunk += block
+
+    if not has_any:
+        await msg.answer("Нет подходящих записей для экспорта.")
+        return
 
     if current_chunk:
         messages.append(current_chunk)
@@ -691,12 +792,17 @@ async def log_set(msg: Message, state: FSMContext):
 
 
 # ═══════════════════════════════════════════
-# ПРОГРЕСС
+# ПРОГРЕСС И ОЧИСТКА СТАРЫХ ДАННЫХ
 # ═══════════════════════════════════════════
 
 @dp.callback_query(F.data == "progress")
 async def progress_cb(call: CallbackQuery):
-    names = _all_exercises(call.from_user.id)
+    user_id = call.from_user.id
+    prog_key = get_user_program(user_id)
+    active_set = set(_program_exercises_ordered(prog_key))
+    names = _all_exercises(user_id)
+    unused = _unused_exercises(user_id)
+
     if not names:
         await call.message.edit_text(
             "📊 <b>Прогресс пуст</b>\n\n"
@@ -705,15 +811,105 @@ async def progress_cb(call: CallbackQuery):
             parse_mode="HTML",
         )
         return
-    rows = [[InlineKeyboardButton(text=name, callback_data=f"ex_{i}")]
-            for i, name in enumerate(names)]
-    rows.append([InlineKeyboardButton(text="🔗 Объединить упражнения", callback_data="merge_start")])
-    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="change_prog")])
+
+    rows = []
+    for i, name in enumerate(names):
+        cnt = len(get_exercise_history(user_id, name))
+        is_old = active_set and (name not in active_set)
+        prefix = "📦 " if is_old else ""
+        cnt_str = f" ({cnt})" if cnt > 0 else ""
+        rows.append([InlineKeyboardButton(text=f"{prefix}{name}{cnt_str}", callback_data=f"ex_{i}")])
+
+    rows.append([
+        InlineKeyboardButton(text="🔗 Объединить", callback_data="merge_start"),
+        InlineKeyboardButton(
+            text=f"🧹 Очистка ({len(unused)} старых)" if unused else "🧹 Очистка истории",
+            callback_data="cleanup_menu",
+        ),
+    ])
+    back_cb = f"prog_{prog_key}" if prog_key else "change_prog"
+    rows.append([InlineKeyboardButton(text="⬅️ Назад к программе", callback_data=back_cb)])
+
+    unused_note = (
+        f"\n📦 <i>Найдено {len(unused)} упр. со старой программы — нажми «🧹 Очистка», чтобы убрать их.</i>"
+        if unused else ""
+    )
     await call.message.edit_text(
         f"📊 <b>Твой прогресс</b>\n\n"
-        f"Выбери упражнение для просмотра истории\n"
-        f"<i>(всего: {len(names)})</i>",
+        f"Выбери упражнение для просмотра и редактирования истории:"
+        f"{unused_note}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "cleanup_menu")
+async def cleanup_menu(call: CallbackQuery):
+    user_id = call.from_user.id
+    unused = _unused_exercises(user_id)
+    buttons = []
+    if unused:
+        buttons.append([InlineKeyboardButton(
+            text=f"🗑 Удалить старые упражнения ({len(unused)} шт.)",
+            callback_data="clean_unused_confirm",
+        )])
+    buttons.append([InlineKeyboardButton(
+        text="🔥 Полный сброс всей истории",
+        callback_data="clean_all_confirm",
+    )])
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад в прогресс", callback_data="progress")])
+
+    unused_list = "\n".join(f"• <code>{u}</code>" for u in unused[:25]) if unused else "<i>Нет лишних упражнений</i>"
+    await call.message.edit_text(
+        f"🧹 <b>Наведение порядка в истории</b>\n\n"
+        f"<b>Незадействованные упражнения со старой программы ({len(unused)}):</b>\n"
+        f"{unused_list}\n\n"
+        f"Что нужно очистить?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "clean_unused_confirm")
+async def clean_unused_exec(call: CallbackQuery):
+    user_id = call.from_user.id
+    unused = _unused_exercises(user_id)
+    removed_sets = 0
+    for name in unused:
+        removed_sets += _delete_exercise_records(user_id, name)
+    await call.answer("Старые упражнения удалены ✅")
+    await call.message.edit_text(
+        f"✅ <b>Готово!</b>\n\n"
+        f"Удалено неиспользуемых упражнений: <b>{len(unused)}</b>\n"
+        f"Очищено старых подходов: <b>{removed_sets}</b>\n\n"
+        f"Теперь в списке остались только актуальные упражнения твоей программы.",
+        reply_markup=_kb_back("progress", "📊 К прогрессу"),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "clean_all_confirm")
+async def clean_all_confirm(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ Да, удалить ВСЮ историю", callback_data="clean_all_execute")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="cleanup_menu")],
+    ])
+    await call.message.edit_text(
+        "⚠️ <b>Полный сброс истории</b>\n\n"
+        "Ты уверен? Это удалит вообще все записанные веса и подходы по всем упражнениям, чтобы начать с нуля.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "clean_all_execute")
+async def clean_all_execute(call: CallbackQuery):
+    deleted = _delete_all_user_records(call.from_user.id)
+    await call.answer("История полностью очищена ✅")
+    await call.message.edit_text(
+        f"✅ <b>Вся старая история удалена ({deleted} записей).</b>\n\n"
+        f"База чистая и готова к новым тренировкам!",
+        reply_markup=_kb_back("progress", "📊 К прогрессу"),
         parse_mode="HTML",
     )
 
@@ -765,7 +961,8 @@ def _render_history(name, rows, idx, user_id=None):
 
     prog_key = get_user_program(user_id) if user_id else None
     ex_cfg = _find_exercise_config(prog_key, name)
-    has_set_details = bool(ex_cfg and ex_cfg.get("set_details"))
+    has_set_details = bool(ex_cfg and ex_cfg.get("set_details")) or (prog_key == "papirosov")
+    total_sets = ex_cfg["sets"] if ex_cfg else 2
 
     weights = [r[2] for r in rows if isinstance(r[2], (int, float))]
     max_w = max(weights) if weights else 0
@@ -778,13 +975,20 @@ def _render_history(name, rows, idx, user_id=None):
         f"│ 🏆 Рекорд: <b>{max_w} кг</b>",
     ]
 
-    if has_set_details and len(ex_cfg["set_details"]) >= 2:
-        top_rows = [r for r in rows if r[4] == 1]
-        back_rows = [r for r in rows if r[4] == 2]
-        if top_rows:
-            lines.append(f"│ 🔥 Посл. Топ-сет: <b>{top_rows[-1][2]} кг × {top_rows[-1][3]}</b>")
-        if back_rows:
-            lines.append(f"│ ⚡️ Посл. Бэк-офф: <b>{back_rows[-1][2]} кг × {back_rows[-1][3]}</b>")
+    if has_set_details:
+        top_list = []
+        back_list = []
+        for d, ddata in by_date.items():
+            for i_s, (sn, w, r) in enumerate(ddata["sets"]):
+                eff = sn if sn in (1, 2) else (1 if i_s == 0 else 2)
+                if eff == 1 or total_sets == 1:
+                    top_list.append((w, r))
+                else:
+                    back_list.append((w, r))
+        if top_list:
+            lines.append(f"│ 🔥 Посл. Топ-сет: <b>{top_list[-1][0]} кг × {top_list[-1][1]}</b>")
+        if back_list and total_sets >= 2:
+            lines.append(f"│ ⚡️ Посл. Бэк-офф: <b>{back_list[-1][0]} кг × {back_list[-1][1]}</b>")
     else:
         lines.append(f"│ ⏱ Последний: <b>{last[2]} кг × {last[3]}</b>")
 
@@ -792,27 +996,30 @@ def _render_history(name, rows, idx, user_id=None):
         f"│ 🗓 Тренировок: <b>{len(by_date)}</b>",
         f"└─────────────────────",
         "",
-        "<b>📅 История:</b>",
+        "<b>📅 История по дням:</b>",
     ])
 
     for d, ddata in by_date.items():
+        lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
+        lines.append(f"<code>{d}</code>{lbl}")
         if has_set_details:
-            formatted_sets = []
+            total_in_day = len(ddata["sets"])
             for i_s, (sn, w, r) in enumerate(ddata["sets"]):
-                tag = "Топ" if (sn == 1 or i_s == 0) else "Бэк"
-                formatted_sets.append(f"{tag}: {w}×{r}")
-            sets_str = " · ".join(formatted_sets)
+                branch = "└" if i_s == total_in_day - 1 else "├"
+                tag = _set_type_label(sn, i_s, has_set_details, total_sets)
+                lines.append(f"   {branch} {tag}: <b>{w} кг × {r}</b>")
         else:
             sets_str = " · ".join(f"{w}×{r}" for _, w, r in ddata["sets"])
-        lbl = f" <i>({ddata['day']})</i>" if ddata["day"] else ""
-        lines.append(f"<code>{d}</code>{lbl}\n   └ {sets_str}")
+            lines.append(f"   └ {sets_str}")
 
     text = "\n".join(lines)
     if len(text) > 3400:
         text = text[:3300] + "\n...<i>(обрезано)</i>"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить запись", callback_data=f"addrec_{idx}")],
-        [InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"editlist_{idx}")],
+        [
+            InlineKeyboardButton(text="➕ Добавить", callback_data=f"addrec_{idx}"),
+            InlineKeyboardButton(text="✏️ Редактировать", callback_data=f"editlist_{idx}"),
+        ],
         [InlineKeyboardButton(text="⬅️ К упражнениям", callback_data="progress")],
     ])
     return text, kb
@@ -913,71 +1120,99 @@ async def merge_choose_to(call: CallbackQuery, state: FSMContext):
 
 
 # ═══════════════════════════════════════════
-# ДОБАВИТЬ ЗАПИСЬ
+# УМНОЕ ДОБАВЛЕНИЕ ЗАПИСИ (ТОП-СЕТ / БЭК-ОФФ)
 # ═══════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("addrec_"))
 async def add_record_start(call: CallbackQuery, state: FSMContext):
-    idx = int(call.data.split("_", 1)[1])
+    suffix = call.data.split("_", 1)[1]
+    if suffix in ("today", "yesterday"):
+        return
+    idx = int(suffix)
     names = _all_exercises(call.from_user.id)
     if idx >= len(names):
         await call.answer("Ошибка")
         return
     name = names[idx]
-    await state.update_data(add_idx=idx, add_name=name)
+    prog_key = get_user_program(call.from_user.id)
+    ex_cfg = _find_exercise_config(prog_key, name)
+    total_sets = ex_cfg["sets"] if ex_cfg else 2
+    has_details = bool(ex_cfg and ex_cfg.get("set_details")) or (prog_key == "papirosov")
+
+    await state.update_data(add_idx=idx, add_name=name, add_set_type=1)
+
+    if has_details and total_sets >= 2:
+        await state.set_state(AddRecord.choosing_set_type)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔥 Топ-сет (1-й подход)", callback_data="addtype_1")],
+            [InlineKeyboardButton(text="⚡️ Бэк-офф (2-й подход)", callback_data="addtype_2")],
+            [InlineKeyboardButton(text="🔥+⚡️ Сразу оба подхода", callback_data="addtype_both")],
+            [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"ex_{idx}")],
+        ])
+        await call.message.edit_text(
+            f"➕ <b>Добавить запись</b>\n\n"
+            f"🎯 <b>{name}</b>\n\n"
+            f"Какой подход добавляем?",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    else:
+        await _ask_add_date(call.message, state, idx, name, "🔥 Топ-сет")
+
+
+@dp.callback_query(AddRecord.choosing_set_type, F.data.startswith("addtype_"))
+async def add_record_choose_type(call: CallbackQuery, state: FSMContext):
+    mode = call.data.split("_", 1)[1]
+    data = await state.get_data()
+    idx = data.get("add_idx", 0)
+    name = data.get("add_name", "")
+    if mode == "1":
+        await state.update_data(add_set_type=1)
+        label = "🔥 Топ-сет"
+    elif mode == "2":
+        await state.update_data(add_set_type=2)
+        label = "⚡️ Бэк-офф"
+    else:
+        await state.update_data(add_set_type="both")
+        label = "🔥 Топ-сет + ⚡️ Бэк-офф"
+    await _ask_add_date(call.message, state, idx, name, label)
+
+
+async def _ask_add_date(message, state: FSMContext, idx: int, name: str, type_label: str):
+    await state.update_data(add_type_label=type_label)
     await state.set_state(AddRecord.entering_date)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Сегодня", callback_data="addrec_today")],
-        [InlineKeyboardButton(text="📅 Вчера", callback_data="addrec_yesterday")],
+        [
+            InlineKeyboardButton(text="📅 Сегодня", callback_data="adddate_today"),
+            InlineKeyboardButton(text="📅 Вчера", callback_data="adddate_yesterday"),
+        ],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"ex_{idx}")],
     ])
-    await call.message.edit_text(
-        f"➕ <b>Добавить запись</b>\n\n"
+    await message.edit_text(
+        f"➕ <b>Добавить: {type_label}</b>\n"
         f"🎯 <b>{name}</b>\n\n"
-        f"<b>Шаг 1.</b> За какую дату?\n\n"
-        f"Нажми кнопку или введи вручную:\n"
-        f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
-        reply_markup=kb, parse_mode="HTML",
-    )
-
-
-@dp.callback_query(F.data == "addrec_today")
-async def add_rec_today(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    name = data.get("add_name")
-    if name is None:
-        await call.answer("Ошибка")
-        return
-    iso = date.today().isoformat()
-    await state.update_data(add_date=iso)
-    await state.set_state(AddRecord.entering_value)
-    await call.message.edit_text(
-        f"➕ <b>{name}</b>\n"
-        f"📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
-        f"<code>80 8</code>",
+        f"<b>За какую дату?</b>\n"
+        f"Нажми кнопку или введи дату (например <code>30.10</code>):",
+        reply_markup=kb,
         parse_mode="HTML",
     )
 
 
-@dp.callback_query(F.data == "addrec_yesterday")
-async def add_rec_yesterday(call: CallbackQuery, state: FSMContext):
+@dp.callback_query(F.data.in_({"adddate_today", "adddate_yesterday"}))
+async def add_rec_quick_date(call: CallbackQuery, state: FSMContext):
     from datetime import timedelta
     data = await state.get_data()
     name = data.get("add_name")
     if name is None:
         await call.answer("Ошибка")
         return
-    iso = (date.today() - timedelta(days=1)).isoformat()
+    if call.data == "adddate_today":
+        iso = date.today().isoformat()
+    else:
+        iso = (date.today() - timedelta(days=1)).isoformat()
     await state.update_data(add_date=iso)
     await state.set_state(AddRecord.entering_value)
-    await call.message.edit_text(
-        f"➕ <b>{name}</b>\n"
-        f"📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
-        f"<code>80 8</code>",
-        parse_mode="HTML",
-    )
+    await _prompt_add_value(call.message, data, iso, edit=True)
 
 
 @dp.message(AddRecord.entering_date)
@@ -986,50 +1221,93 @@ async def add_record_date(msg: Message, state: FSMContext):
     if not iso:
         await msg.answer(
             "❌ Не понял дату.\n\n"
-            "Попробуй: <code>25.09</code>, <code>26.09.2026</code>, <code>2026-09-26</code>",
+            "Попробуй: <code>30.10</code>, <code>30.10.2026</code>",
             parse_mode="HTML",
         )
         return
-    data = await state.get_data()
-    name = data.get("add_name")
     await state.update_data(add_date=iso)
+    data = await state.get_data()
     await state.set_state(AddRecord.entering_value)
-    await msg.answer(
+    await _prompt_add_value(msg, data, iso, edit=False)
+
+
+async def _prompt_add_value(message, data, iso, edit=False):
+    name = data.get("add_name")
+    type_label = data.get("add_type_label", "🔥 Топ-сет")
+    set_type = data.get("add_set_type", 1)
+    if set_type == "both":
+        hint = (
+            "Введи <b>Топ-сет и Бэк-офф</b> через слэш или с новой строки:\n"
+            "<code>80 8 / 65 12</code>"
+        )
+    else:
+        hint = "Введи <b>вес и повторы</b> через пробел:\n<code>80 8</code>"
+    text = (
         f"➕ <b>{name}</b>\n"
-        f"📅 {iso}\n\n"
-        f"<b>Шаг 2.</b> Введи вес и повторы:\n"
-        f"<code>80 8</code>",
-        parse_mode="HTML",
+        f"🏷 {type_label} • 📅 {iso}\n\n"
+        f"{hint}"
     )
+    if edit:
+        await message.edit_text(text, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(AddRecord.entering_value)
 async def add_record_apply(msg: Message, state: FSMContext):
-    try:
-        parts = msg.text.replace(",", ".").split()
-        weight = float(parts[0])
-        reps = int(parts[1])
-    except (ValueError, IndexError):
-        await msg.answer("❌ Формат: <code>80 8</code>", parse_mode="HTML")
-        return
     data = await state.get_data()
     name = data.get("add_name")
     iso = data.get("add_date") or date.today().isoformat()
+    set_type = data.get("add_set_type", 1)
+
     if name is None:
-        await msg.answer("Что-то потерялось, начни заново: 📊 Прогресс")
+        await msg.answer("Что-то потерялось, открой 📊 Прогресс")
         await state.clear()
         return
+
     prog_key = get_user_program(msg.from_user.id)
     day_name = _find_day_for_exercise(prog_key, name)
     key = f"{day_name}|{name}" if day_name else name
-    set_num = count_sets_on_date(msg.from_user.id, key, iso) + 1
-    save_set(msg.from_user.id, prog_key or "", day_name, key, set_num, weight, reps, date_str=iso)
+
+    if set_type == "both":
+        raw = msg.text.replace(",", ".").replace("\n", "/")
+        chunks = [c.strip() for c in raw.split("/") if c.strip()]
+        if len(chunks) < 2 and len(raw.split()) == 4:
+            tokens = raw.split()
+            chunks = [f"{tokens[0]} {tokens[1]}", f"{tokens[2]} {tokens[3]}"]
+        try:
+            p1 = chunks[0].split()
+            w1, r1 = float(p1[0]), int(p1[1])
+            p2 = chunks[1].split()
+            w2, r2 = float(p2[0]), int(p2[1])
+        except (ValueError, IndexError):
+            await msg.answer(
+                "❌ Введи два подхода через слэш:\n<code>80 8 / 65 12</code>",
+                parse_mode="HTML",
+            )
+            return
+        save_set(msg.from_user.id, prog_key or "", day_name, key, 1, w1, r1, date_str=iso)
+        save_set(msg.from_user.id, prog_key or "", day_name, key, 2, w2, r2, date_str=iso)
+        summary = f"🔥 Топ-сет: <b>{w1} кг × {r1}</b>\n⚡️ Бэк-офф: <b>{w2} кг × {r2}</b>"
+    else:
+        try:
+            parts = msg.text.replace(",", ".").split()
+            weight = float(parts[0])
+            reps = int(parts[1])
+        except (ValueError, IndexError):
+            await msg.answer("❌ Формат: <code>80 8</code>", parse_mode="HTML")
+            return
+        set_num = int(set_type) if set_type in (1, 2) else (count_sets_on_date(msg.from_user.id, key, iso) + 1)
+        save_set(msg.from_user.id, prog_key or "", day_name, key, set_num, weight, reps, date_str=iso)
+        lbl = "🔥 Топ-сет" if set_num == 1 else "⚡️ Бэк-офф"
+        summary = f"{lbl}: <b>{weight} кг × {reps}</b>"
+
     await state.clear()
     await msg.answer(
-        f"✅ <b>Добавлено</b>\n\n"
+        f"✅ <b>Запись добавлена</b>\n\n"
         f"🎯 {name}\n"
         f"📅 {iso}\n"
-        f"🏋️ {weight} кг × {reps}",
+        f"{summary}",
         parse_mode="HTML",
     )
     names = _all_exercises(msg.from_user.id)
@@ -1045,7 +1323,7 @@ async def add_record_apply(msg: Message, state: FSMContext):
 
 
 # ═══════════════════════════════════════════
-# РЕДАКТИРОВАНИЕ
+# УМНОЕ РЕДАКТИРОВАНИЕ
 # ═══════════════════════════════════════════
 
 @dp.callback_query(F.data.startswith("editlist_"))
@@ -1060,20 +1338,63 @@ async def edit_list(call: CallbackQuery):
     if not rows:
         await call.answer("Нет записей", show_alert=True)
         return
+
+    prog_key = get_user_program(call.from_user.id)
+    ex_cfg = _find_exercise_config(prog_key, name)
+    total_sets = ex_cfg["sets"] if ex_cfg else 2
+    has_details = bool(ex_cfg and ex_cfg.get("set_details")) or (prog_key == "papirosov")
+
     display = rows[-20:]
     buttons = []
     for set_id, d, w, r, sn, ex, day_name in reversed(display):
         dkey = d[:10]
-        label = f"{dkey} • {w}кг × {r}"
+        tag = _set_type_label(sn, 0, has_details, total_sets)
+        label = f"{dkey} • {tag}: {w}кг × {r}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"rec_{set_id}_{idx}")])
+
+    buttons.append([InlineKeyboardButton(text="🗑 Очистить всё упражнение", callback_data=f"wipeex_{idx}")])
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"ex_{idx}")])
     await call.message.edit_text(
-        f"✏️ <b>{name}</b>\n\n"
-        f"Выбери запись для изменения\n"
+        f"✏️ <b>Редактирование: {name}</b>\n\n"
+        f"Выбери подход для изменения\n"
         f"<i>(показаны последние {len(display)} из {len(rows)})</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML",
     )
+
+
+@dp.callback_query(F.data.startswith("wipeex_"))
+async def wipe_exercise_confirm(call: CallbackQuery):
+    idx = int(call.data.split("_")[1])
+    names = _all_exercises(call.from_user.id)
+    if idx >= len(names):
+        await call.answer("Ошибка")
+        return
+    name = names[idx]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ Да, удалить все записи", callback_data=f"wipeexok_{idx}")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data=f"editlist_{idx}")],
+    ])
+    await call.message.edit_text(
+        f"🗑 <b>Удалить всю историю упражнения?</b>\n\n"
+        f"🎯 <b>{name}</b>\n"
+        f"Все записанные подходы в этом упражнении будут удалены.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("wipeexok_"))
+async def wipe_exercise_exec(call: CallbackQuery):
+    idx = int(call.data.split("_")[1])
+    names = _all_exercises(call.from_user.id)
+    if idx >= len(names):
+        await call.answer("Ошибка")
+        return
+    name = names[idx]
+    cnt = _delete_exercise_records(call.from_user.id, name)
+    await call.answer(f"Удалено записей: {cnt} ✅")
+    await progress_cb(call)
 
 
 @dp.callback_query(F.data.startswith("rec_"))
@@ -1096,23 +1417,57 @@ async def show_record_actions(call: CallbackQuery):
         await call.answer("Запись не найдена")
         return
     _, d, w, r, sn, ex, day_name = target
+    prog_key = get_user_program(call.from_user.id)
+    ex_cfg = _find_exercise_config(prog_key, name)
+    total_sets = ex_cfg["sets"] if ex_cfg else 2
+    tag = _set_type_label(sn, 0, True, total_sets)
+    toggle_text = "🔄 Сделать Бэк-оффом" if sn == 1 else "🔄 Сделать Топ-сетом"
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Вес/повторы", callback_data=f"editrec_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="📅 Дату", callback_data=f"editdate_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="🔀 В др. упражнение", callback_data=f"moverec_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delrec_{set_id}_{ex_idx}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"editlist_{ex_idx}")],
+        [
+            InlineKeyboardButton(text="✏️ Вес / повторы", callback_data=f"editrec_{set_id}_{ex_idx}"),
+            InlineKeyboardButton(text="📅 Дату", callback_data=f"editdate_{set_id}_{ex_idx}"),
+        ],
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"toggleset_{set_id}_{ex_idx}")],
+        [
+            InlineKeyboardButton(text="🔀 Перенести", callback_data=f"moverec_{set_id}_{ex_idx}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delrec_{set_id}_{ex_idx}"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data=f"editlist_{ex_idx}")],
     ])
     await call.message.edit_text(
         f"📝 <b>{name}</b>\n\n"
         f"┌─────────────────────\n"
-        f"│ 📅 {d[:10]}\n"
-        f"│ 🏋️ {w} кг × {r} повторов\n"
-        f"│ Подход №{sn}\n"
+        f"│ 🏷 Тип: <b>{tag}</b>\n"
+        f"│ 📅 Дата: <b>{d[:10]}</b>\n"
+        f"│ 🏋️ Результат: <b>{w} кг × {r}</b>\n"
         f"└─────────────────────\n\n"
-        f"<b>Что делаем?</b>",
+        f"<b>Что меняем?</b>",
         reply_markup=kb, parse_mode="HTML",
     )
+
+
+@dp.callback_query(F.data.startswith("toggleset_"))
+async def toggle_set_type(call: CallbackQuery):
+    parts = call.data.split("_")
+    set_id = int(parts[1])
+    ex_idx = int(parts[2])
+    names = _all_exercises(call.from_user.id)
+    if ex_idx >= len(names):
+        await call.answer("Ошибка")
+        return
+    name = names[ex_idx]
+    rows = get_exercise_history(call.from_user.id, name)
+    target = next((r for r in rows if r[0] == set_id), None)
+    if not target:
+        await call.answer("Запись не найдена")
+        return
+    current_sn = target[4]
+    new_sn = 2 if current_sn == 1 else 1
+    _update_set_number_in_db(call.from_user.id, set_id, new_sn)
+    new_lbl = "⚡️ Бэк-офф" if new_sn == 2 else "🔥 Топ-сет"
+    await call.answer(f"Теперь это {new_lbl} ✅")
+    await show_record_actions(call)
 
 
 @dp.callback_query(F.data.startswith("editrec_"))
@@ -1122,34 +1477,64 @@ async def edit_record(call: CallbackQuery, state: FSMContext):
     ex_idx = int(parts[2])
     names = _all_exercises(call.from_user.id)
     name = names[ex_idx]
-    await state.update_data(edit_set_id=set_id, edit_ex_idx=ex_idx, edit_name=name)
+    rows = get_exercise_history(call.from_user.id, name)
+    target = next((r for r in rows if r[0] == set_id), None)
+    old_w = target[2] if target else 0
+    old_r = target[3] if target else 0
+
+    await state.update_data(
+        edit_set_id=set_id,
+        edit_ex_idx=ex_idx,
+        edit_name=name,
+        old_weight=old_w,
+        old_reps=old_r,
+    )
     await state.set_state(EditFlow.entering_new)
+    kb = _kb_back(f"rec_{set_id}_{ex_idx}", "⬅️ Отмена")
     await call.message.edit_text(
-        f"✏️ <b>Изменение веса/повторов</b>\n\n"
-        f"🎯 <b>{name}</b>\n\n"
-        f"Введи новые значения: <code>85 8</code>",
+        f"✏️ <b>Умное изменение</b>\n\n"
+        f"🎯 <b>{name}</b>\n"
+        f"Сейчас: <code>{old_w} кг × {old_r}</code>\n\n"
+        f"• Введи <code>85 10</code> — чтобы изменить вес и повторы\n"
+        f"• Введи <code>85</code> — чтобы изменить только вес (повторы останутся {old_r})\n"
+        f"• Введи <code>+2.5</code> или <code>-5</code> — чтобы прибавить/убавить вес",
+        reply_markup=kb,
         parse_mode="HTML",
     )
 
 
 @dp.message(EditFlow.entering_new)
 async def apply_edit(msg: Message, state: FSMContext):
-    try:
-        parts = msg.text.replace(",", ".").split()
-        weight = float(parts[0])
-        reps = int(parts[1])
-    except (ValueError, IndexError):
-        await msg.answer("❌ Формат: <code>85 8</code>", parse_mode="HTML")
-        return
     data = await state.get_data()
     set_id = data["edit_set_id"]
     ex_idx = data["edit_ex_idx"]
     name = data["edit_name"]
+    old_w = float(data.get("old_weight") or 0)
+    old_r = int(data.get("old_reps") or 8)
+
+    raw = msg.text.strip().replace(",", ".")
+    parts = raw.split()
+    try:
+        if len(parts) == 1:
+            token = parts[0]
+            if token.startswith("+") or token.startswith("-"):
+                weight = round(old_w + float(token), 2)
+                reps = old_r
+            else:
+                weight = float(token)
+                reps = old_r
+        else:
+            weight = float(parts[0])
+            reps = int(parts[1])
+    except (ValueError, IndexError):
+        await msg.answer("❌ Примеры ввода: <code>85 8</code>, <code>85</code> или <code>+2.5</code>", parse_mode="HTML")
+        return
+
     update_set(msg.from_user.id, set_id, weight, reps)
     await state.clear()
     rows = get_exercise_history(msg.from_user.id, name)
     text, kb = _render_history(name, rows, ex_idx, user_id=msg.from_user.id)
-    await msg.answer(f"✅ <b>Записано:</b> {weight} кг × {reps}", parse_mode="HTML")
+    await msg.answer(f"✅ <b>Обновлено:</b> {weight} кг × {reps}", parse_mode="HTML")
     await msg.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -1172,7 +1557,7 @@ async def edit_date(call: CallbackQuery, state: FSMContext):
         f"📅 <b>Изменить дату</b>\n\n"
         f"🎯 <b>{name}</b>\n\n"
         f"Выбери или введи вручную:\n"
-        f"<code>25.09</code> · <code>26.09.2026</code> · <code>2026-09-26</code>",
+        f"<code>30.10</code> · <code>30.10.2026</code>",
         reply_markup=kb, parse_mode="HTML",
     )
 
@@ -1203,7 +1588,7 @@ async def apply_date(msg: Message, state: FSMContext):
     iso = _parse_date(msg.text)
     if not iso:
         await msg.answer(
-            "❌ Не понял дату. Попробуй: <code>25.09</code>, <code>26.09.2026</code>",
+            "❌ Не понял дату. Попробуй: <code>30.10</code>, <code>30.10.2026</code>",
             parse_mode="HTML",
         )
         return
