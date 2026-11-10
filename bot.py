@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sqlite3
 from collections import OrderedDict
 from datetime import date, datetime
@@ -64,6 +65,85 @@ def get_user_hidden_programs(user):
         if prog_key in PROGRAMS and can_access_program(prog_key, user):
             res.append(prog_key)
     return res
+
+
+# ═══════════════════════════════════════════
+# СПРАВОЧНИК RIR И ТЕРМИНОВ
+# ═══════════════════════════════════════════
+
+def _explain_term_query(text: str):
+    """Распознаёт запрос вида 'rir 2', 'рир 1-2', 'rir', 'lp' и возвращает ответ."""
+    if not text:
+        return None
+    t = text.strip().lower()
+
+    m = re.match(r"^(?:rir|рир)\s*([0-9]+(?:\s*[-–/]\s*[0-9]+)?|\+)?$", t)
+    if m:
+        val = m.group(1)
+        if not val:
+            return (
+                "ℹ️ <b>Что такое RIR (Reps In Reserve)?</b>\n\n"
+                "<b>RIR</b> — это <b>повторения в запасе</b> (сколько ещё раз ты бы смогла сделать упражнение с правильной техникой перед тем, как силы закончатся).\n\n"
+                "• <code>RIR 0</code> — <b>0 в запасе</b> (работа до полного отказа).\n"
+                "• <code>RIR 1</code> — <b>1 повтор в запасе</b> (очень тяжело, почти предел).\n"
+                "• <code>RIR 2</code> — <b>2 повтора в запасе</b> (комфортно-тяжело, техника идеальная).\n"
+                "• <code>RIR 2-3</code> — <b>2–3 повтора в запасе</b> (режим Лайт, без перегрузки и жжения).\n"
+                "• <code>RIR 3-4</code> — <b>3–4 повтора в запасе</b> (лёгкий разминочный или тонизирующий режим).\n\n"
+                "💡 <i>Напиши в чат, например, <code>rir 2</code> или <code>rir 0</code>, чтобы узнать подробнее!</i>"
+            )
+        val_clean = val.replace(" ", "").replace("–", "-")
+        explanations = {
+            "0": (
+                "🔥 <b>RIR 0 — 0 повторений в запасе (Отказ)</b>\n\n"
+                "Ты делаешь подход до момента, пока физически не сможешь выполнить ещё одно повторение с правильной техникой."
+            ),
+            "0-1": (
+                "🔥 <b>RIR 0-1 — максимум 1 повтор в запасе</b>\n\n"
+                "Останавливаешься либо на последнем возможном повторении, либо за 1 шаг до полного отказа."
+            ),
+            "1": (
+                "💪 <b>RIR 1 — 1 повторение в запасе</b>\n\n"
+                "Заканчиваешь подход, когда чувствуешь, что через силу смогла бы сделать <b>только 1</b> последнее повторение."
+            ),
+            "1-2": (
+                "💪 <b>RIR 1-2 — в запасе 1–2 повторения</b>\n\n"
+                "Последние повторы даются ощутимо и замедляются, но ты заканчиваешь подход с запасом на 1–2 чистых повтора."
+            ),
+            "2": (
+                "✅ <b>RIR 2 — 2 повторения в запасе</b>\n\n"
+                "Оптимальный и безопасный режим! Ты заканчиваешь подход, когда мышцы хорошо поработали, но ты точно знаешь, что при желании сделала бы ещё <b>2 повторения</b> без поломки техники."
+            ),
+            "2-3": (
+                "🌿 <b>RIR 2-3 — в запасе 2–3 повторения (Режим Лайт)</b>\n\n"
+                "Комфортная нагрузка без борьбы с весом. Заканчиваешь подход, когда движение ещё плавное и в запасе остаётся <b>2–3 уверенных повторения</b>."
+            ),
+            "3": (
+                "🌿 <b>RIR 3 — 3 повторения в запасе</b>\n\n"
+                "Мягкий тонизирующий подход: мышцы включились в работу, дыхание спокойное, в запасе ещё минимум <b>3 повторения</b>."
+            ),
+        }
+        if val_clean in explanations:
+            return explanations[val_clean]
+        return (
+            f"ℹ️ <b>RIR {val_clean} — повторений в запасе: {val_clean}</b>\n\n"
+            f"Это значит, что ты завершаешь подход тогда, когда чувствуешь, что с правильной техникой можешь сделать ещё <b>{val_clean} повт.</b>"
+        )
+
+    if t in ("lp", "лп", "частичные"):
+        return (
+            "⚡️ <b>Что такое LP (Lengthened Partials)?</b>\n\n"
+            "Это <b>частичные повторения в растянутой позиции</b> (примерно в 30% амплитуды).\n"
+            "Когда ты больше не можешь сделать полное повторение, сразу без отдыха доделай 3–5 коротких движений в самой нижней (растянутой) части амплитуды."
+        )
+
+    if t in ("топсет", "топ-сет", "topset", "бэкофф", "бэк-офф", "backoff"):
+        return (
+            "🔥 <b>Топ-сет и ⚡️ Бэк-офф</b>\n\n"
+            "• <b>Топ-сет (1-й подход):</b> главный рабочий подход с максимальным весом под заданные повторы.\n"
+            "• <b>Бэк-офф (2-й подход):</b> вес снижается на 15–20%, чтобы выполнить больше повторений (обычно 10–15) с отличным контролем."
+        )
+
+    return None
 
 
 # ═══════════════════════════════════════════
@@ -252,6 +332,7 @@ def levels_kb(user):
             text=btn_text,
             callback_data=f"prog_{prog_key}",
         )])
+    buttons.append([InlineKeyboardButton(text="❓ Что такое RIR / Термины", callback_data="rir_info")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -271,7 +352,10 @@ def days_kb(program_key):
     p = PROGRAMS[program_key]
     rows = [[InlineKeyboardButton(text=d["name"], callback_data=f"day_{i}")]
             for i, d in enumerate(p["days"])]
-    rows.append([InlineKeyboardButton(text="📊 Прогресс", callback_data="progress")])
+    rows.append([
+        InlineKeyboardButton(text="📊 Прогресс", callback_data="progress"),
+        InlineKeyboardButton(text="❓ Что такое RIR", callback_data="rir_info"),
+    ])
     rows.append([InlineKeyboardButton(text="⬅️ К программам", callback_data="change_prog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -350,7 +434,7 @@ def _format_specific_set_hint(user_id, ex_name, set_idx, short_label):
 
 
 # ═══════════════════════════════════════════
-# КОМАНДЫ (СТАРТ, DEBUG, FIXNONE, EXPORT)
+# КОМАНДЫ (СТАРТ, RIR, DEBUG, FIXNONE, EXPORT)
 # ═══════════════════════════════════════════
 
 @dp.message(Command("start", ignore_case=True))
@@ -369,7 +453,10 @@ async def start(msg: Message, state: FSMContext):
         card += f"└─────────────────────"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶️ Продолжить тренировку", callback_data=f"prog_{saved}")],
-            [InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress")],
+            [
+                InlineKeyboardButton(text="📊 Мой прогресс", callback_data="progress"),
+                InlineKeyboardButton(text="❓ Что такое RIR", callback_data="rir_info"),
+            ],
             [InlineKeyboardButton(text="🔄 Сменить программу", callback_data="change_prog")],
         ])
         await msg.answer(header + card, reply_markup=kb, parse_mode="HTML")
@@ -381,6 +468,56 @@ async def start(msg: Message, state: FSMContext):
             reply_markup=levels_kb(msg.from_user),
             parse_mode="HTML",
         )
+
+
+@dp.message(Command("rir", ignore_case=True))
+async def rir_cmd(msg: Message):
+    parts = (msg.text or "").split(maxsplit=1)
+    query = f"rir {parts[1]}" if len(parts) > 1 else "rir"
+    ans = _explain_term_query(query)
+    await msg.answer(ans, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "rir_info")
+async def rir_info_cb(call: CallbackQuery):
+    saved = get_user_program(call.from_user.id)
+    back_cb = f"prog_{saved}" if saved else "change_prog"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="RIR 0", callback_data="rir_val_0"),
+            InlineKeyboardButton(text="RIR 1", callback_data="rir_val_1"),
+            InlineKeyboardButton(text="RIR 2", callback_data="rir_val_2"),
+            InlineKeyboardButton(text="RIR 2-3", callback_data="rir_val_2-3"),
+        ],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)],
+    ])
+    await call.message.edit_text(
+        _explain_term_query("rir"),
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data.startswith("rir_val_"))
+async def rir_val_cb(call: CallbackQuery):
+    val = call.data.split("rir_val_", 1)[1]
+    saved = get_user_program(call.from_user.id)
+    back_cb = f"prog_{saved}" if saved else "change_prog"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="RIR 0", callback_data="rir_val_0"),
+            InlineKeyboardButton(text="RIR 1", callback_data="rir_val_1"),
+            InlineKeyboardButton(text="RIR 2", callback_data="rir_val_2"),
+            InlineKeyboardButton(text="RIR 2-3", callback_data="rir_val_2-3"),
+        ],
+        [InlineKeyboardButton(text="📖 Все значения RIR", callback_data="rir_info")],
+        [InlineKeyboardButton(text="⬅️ Назад к программе", callback_data=back_cb)],
+    ])
+    await call.message.edit_text(
+        _explain_term_query(f"rir {val}"),
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("debug", ignore_case=True))
@@ -634,6 +771,7 @@ async def choose_day(call: CallbackQuery, state: FSMContext):
     lines.append(f"⚡ <i>Всего упражнений: {len(day['exercises'])}</i>")
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 НАЧАТЬ ТРЕНИРОВКУ", callback_data=f"start_{day_idx}")],
+        [InlineKeyboardButton(text="❓ Что такое RIR", callback_data="rir_info")],
         [InlineKeyboardButton(text="⬅️ К дням", callback_data=f"prog_{saved}")],
     ])
     await call.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode="HTML")
@@ -715,6 +853,15 @@ async def send_current(message, state):
 
 @dp.message(Workout.entering_set)
 async def log_set(msg: Message, state: FSMContext):
+    term_explanation = _explain_term_query(msg.text)
+    if term_explanation:
+        await msg.answer(
+            f"{term_explanation}\n\n"
+            f"✍️ <i>Продолжаем подход — введи вес и повторы через пробел (например: <code>40 12</code>):</i>",
+            parse_mode="HTML",
+        )
+        return
+
     try:
         parts = msg.text.replace(",", ".").split()
         weight = float(parts[0])
@@ -723,7 +870,8 @@ async def log_set(msg: Message, state: FSMContext):
         await msg.answer(
             "❌ <b>Не понял формат</b>\n\n"
             "Введи вес и повторы через пробел:\n"
-            "<code>80 8</code>",
+            "<code>40 12</code>\n\n"
+            "<i>(Или напиши <code>rir 2</code>, чтобы узнать про запас повторений)</i>",
             parse_mode="HTML",
         )
         return
@@ -1697,12 +1845,18 @@ async def delete_record(call: CallbackQuery):
 
 @dp.message(F.text)
 async def fallback(msg: Message, state: FSMContext):
+    term_explanation = _explain_term_query(msg.text)
+    if term_explanation:
+        await msg.answer(term_explanation, parse_mode="HTML")
+        return
+
     current = await state.get_state()
     if current:
         return
     await msg.answer(
         "🤔 <b>Не понял команду</b>\n\n"
-        "Нажми /start чтобы открыть меню.",
+        "• Нажми /start чтобы открыть меню\n"
+        "• Напиши <code>rir 2</code> чтобы узнать про повторы в запасе",
         parse_mode="HTML",
     )
 
